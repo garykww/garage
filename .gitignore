@@ -1,0 +1,62 @@
+# OS artifacts
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.next/
+.nuxt/
+.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Go
+/go/bin/
+
+# Rust
+target/
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+.gradle/
+
+# Build outputs (language-agnostic)
+dist/
+build/
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+*.pem
+*.key

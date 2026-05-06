@@ -1,0 +1,64 @@
+name: PR Scope Check
+
+on:
+  pull_request:
+    branches: ["main"]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  check-scope:
+    name: Ensure PR touches only one app
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check PR touches at most one app folder
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          echo "Base SHA: $BASE_SHA"
+          echo "Head SHA: $HEAD_SHA"
+
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          echo "=== Changed files ==="
+          echo "$CHANGED_FILES"
+          echo "====================="
+
+          # Extract unique top-level directory names.
+          # Only consider paths that contain '/' (i.e. inside a subfolder).
+          # Exclude hidden directories like .github.
+          CHANGED_APPS=$(echo "$CHANGED_FILES" \
+            | grep '/' \
+            | cut -d'/' -f1 \
+            | grep -v '^\.' \
+            | sort -u)
+
+          echo "=== Changed app folders ==="
+          echo "${CHANGED_APPS:-<none>}"
+          echo "==========================="
+
+          # grep -c returns exit 1 on zero matches; || true prevents set -e from killing the job
+          APP_COUNT=$(echo "$CHANGED_APPS" | grep -c '[^[:space:]]' || true)
+
+          echo "Number of app folders touched: $APP_COUNT"
+
+          if [ "$APP_COUNT" -gt 1 ]; then
+            echo ""
+            echo "ERROR: This PR touches $APP_COUNT app folders:"
+            echo "$CHANGED_APPS" | sed 's/^/  - /'
+            echo ""
+            echo "Please split into separate PRs — one PR per app folder."
+            exit 1
+          fi
+
+          echo "OK: PR touches $APP_COUNT app folder(s). Scope check passed."

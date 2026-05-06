@@ -1,0 +1,185 @@
+name: App CI
+
+on:
+  pull_request:
+    branches: ["main"]
+    types: [opened, synchronize, reopened]
+  push:
+    branches: ["main"]
+
+jobs:
+  detect-and-run:
+    name: Detect changed app and run CI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed app folder
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+
+          NULL_SHA="0000000000000000000000000000000000000000"
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "Event: pull_request — diff $BASE_SHA..$HEAD_SHA"
+            CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          elif [ "$EVENT_NAME" = "push" ]; then
+            if [ "$BEFORE_SHA" = "$NULL_SHA" ]; then
+              echo "Event: push (initial) — listing all files in HEAD"
+              CHANGED_FILES=$(git ls-tree -r --name-only HEAD)
+            else
+              echo "Event: push — diff $BEFORE_SHA..$AFTER_SHA"
+              CHANGED_FILES=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")
+            fi
+
+          else
+            echo "Unsupported event: $EVENT_NAME"
+            exit 1
+          fi
+
+          echo "=== Changed files ==="
+          echo "$CHANGED_FILES"
+          echo "====================="
+
+          # Identify the top-level app folder (non-hidden dirs only).
+          # head -n1 is a safe fallback; pr-scope-check already guarantees at most one on PRs.
+          APP_DIR=$(echo "$CHANGED_FILES" \
+            | grep '/' \
+            | cut -d'/' -f1 \
+            | grep -v '^\.' \
+            | sort -u \
+            | head -n1)
+
+          if [ -z "$APP_DIR" ]; then
+            echo "No app folder changes detected (only root-level or hidden-dir files changed)."
+            echo "app_dir=" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Detected app folder: $APP_DIR"
+            echo "app_dir=$APP_DIR" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run CI for ${{ steps.detect.outputs.app_dir || 'detected app' }}
+        if: steps.detect.outputs.skip == 'false'
+        env:
+          APP_DIR: ${{ steps.detect.outputs.app_dir }}
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Running CI for: $APP_DIR"
+          echo "=========================================="
+
+          if [ ! -d "$APP_DIR" ]; then
+            echo "Directory '$APP_DIR' not found at this ref (deleted or renamed). Skipping."
+            exit 0
+          fi
+
+          cd "$APP_DIR"
+
+          # ── 1. Custom script ──────────────────────────────────────────────
+          if [ -f "ci.sh" ]; then
+            echo "Found ci.sh — running custom CI"
+            chmod +x ci.sh
+            bash ci.sh
+            exit 0
+          fi
+
+          # ── 2. Node.js ────────────────────────────────────────────────────
+          if [ -f "package.json" ]; then
+            echo "Detected Node.js (package.json)"
+            if [ -f "package-lock.json" ]; then
+              npm ci
+            elif [ -f "yarn.lock" ]; then
+              yarn install --frozen-lockfile
+            elif [ -f "pnpm-lock.yaml" ]; then
+              npm install -g pnpm && pnpm install --frozen-lockfile
+            else
+              npm install
+            fi
+            npm test --if-present
+            npm run build --if-present
+            exit 0
+          fi
+
+          # ── 3. Python ─────────────────────────────────────────────────────
+          if [ -f "pyproject.toml" ] || [ -f "requirements.txt" ] || [ -f "setup.py" ]; then
+            echo "Detected Python"
+            python3 -m venv .venv
+            # shellcheck source=/dev/null
+            source .venv/bin/activate
+            if [ -f "pyproject.toml" ]; then
+              pip install -e ".[dev]" 2>/dev/null || pip install -e .
+            elif [ -f "requirements.txt" ]; then
+              pip install -r requirements.txt
+              [ -f "requirements-dev.txt" ] && pip install -r requirements-dev.txt
+            else
+              pip install -e .
+            fi
+            python -m pytest --tb=short 2>/dev/null || python -m unittest discover
+            exit 0
+          fi
+
+          # ── 4. Go ─────────────────────────────────────────────────────────
+          if [ -f "go.mod" ]; then
+            echo "Detected Go (go.mod)"
+            go build ./...
+            go test ./...
+            exit 0
+          fi
+
+          # ── 5. Rust ───────────────────────────────────────────────────────
+          if [ -f "Cargo.toml" ]; then
+            echo "Detected Rust (Cargo.toml)"
+            cargo build
+            cargo test
+            exit 0
+          fi
+
+          # ── 6. Java / Maven ───────────────────────────────────────────────
+          if [ -f "pom.xml" ]; then
+            echo "Detected Java/Maven (pom.xml)"
+            mvn --no-transfer-progress verify
+            exit 0
+          fi
+
+          # ── 7. Java / Gradle ──────────────────────────────────────────────
+          if [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+            echo "Detected Java/Gradle"
+            if [ -f "gradlew" ]; then
+              chmod +x gradlew
+              ./gradlew build
+            else
+              gradle build
+            fi
+            exit 0
+          fi
+
+          # ── 8. Makefile ───────────────────────────────────────────────────
+          if [ -f "Makefile" ] || [ -f "makefile" ] || [ -f "GNUmakefile" ]; then
+            echo "Detected Makefile"
+            make build || make all || make
+            exit 0
+          fi
+
+          # ── 9. Unknown ────────────────────────────────────────────────────
+          echo "No recognized build file found in '$APP_DIR'."
+          echo "Directory contents:"
+          ls -la
+          echo ""
+          echo "To add CI: create a ci.sh or add a standard build file (package.json, go.mod, etc.)"
