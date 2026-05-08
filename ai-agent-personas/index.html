@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Agent Personas for Software Engineering</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 3rem;
+    }
+
+    header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #f8fafc;
+    }
+
+    header p {
+      margin-top: 0.5rem;
+      color: #94a3b8;
+      font-size: 1rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 1.25rem;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: #1e2330;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      transition: border-color 0.2s, transform 0.15s;
+    }
+
+    .card:hover {
+      border-color: #4f6ef7;
+      transform: translateY(-2px);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .card-emoji {
+      font-size: 1.75rem;
+      flex-shrink: 0;
+    }
+
+    .card-name {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: #f1f5f9;
+    }
+
+    .card-description {
+      font-size: 0.875rem;
+      color: #94a3b8;
+      line-height: 1.6;
+    }
+
+    .responsibilities {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .responsibilities li {
+      font-size: 0.8125rem;
+      color: #cbd5e1;
+      padding-left: 1.1rem;
+      position: relative;
+      line-height: 1.5;
+    }
+
+    .responsibilities li::before {
+      content: "›";
+      position: absolute;
+      left: 0;
+      color: #4f6ef7;
+      font-weight: 700;
+    }
+
+    .tone-block {
+      background: #151923;
+      border-left: 3px solid #4f6ef7;
+      border-radius: 4px;
+      padding: 0.6rem 0.75rem;
+      font-size: 0.8rem;
+      color: #94a3b8;
+      font-style: italic;
+      line-height: 1.5;
+    }
+
+    details {
+      margin-top: auto;
+    }
+
+    summary {
+      font-size: 0.8rem;
+      color: #4f6ef7;
+      cursor: pointer;
+      user-select: none;
+      padding: 0.25rem 0;
+    }
+
+    summary:hover { color: #7c9cf7; }
+
+    .prompt-box {
+      margin-top: 0.5rem;
+      background: #0d1117;
+      border: 1px solid #2d3748;
+      border-radius: 6px;
+      padding: 0.75rem;
+      font-size: 0.78rem;
+      color: #a3b4cc;
+      font-family: ui-monospace, monospace;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    footer {
+      text-align: center;
+      margin-top: 3rem;
+      font-size: 0.8rem;
+      color: #4a5568;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AI Agent Personas</h1>
+    <p>Common roles for software engineering agents — what they do, how they think, and how to prompt them.</p>
+  </header>
+
+  <div class="grid" id="grid"></div>
+
+  <footer>
+    <p>ai-agent-personas &mdash; garage monorepo</p>
+  </footer>
+
+  <script>
+    fetch('personas.json')
+      .then(r => r.json())
+      .then(data => render(data.personas))
+      .catch(() => {
+        document.getElementById('grid').textContent = 'Failed to load personas.json';
+      });
+
+    function render(personas) {
+      const grid = document.getElementById('grid');
+      grid.innerHTML = personas.map(p => `
+        <article class="card">
+          <div class="card-header">
+            <span class="card-emoji" aria-hidden="true">${p.emoji}</span>
+            <span class="card-name">${p.name}</span>
+          </div>
+          <p class="card-description">${p.description}</p>
+          <ul class="responsibilities">
+            ${p.responsibilities.map(r => `<li>${r}</li>`).join('')}
+          </ul>
+          <div class="tone-block">${p.tone}</div>
+          <details>
+            <summary>Example prompt</summary>
+            <div class="prompt-box">${p.example_prompt}</div>
+          </details>
+        </article>
+      `).join('');
+    }
+  </script>
+</body>
+</html>
