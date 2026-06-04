@@ -2,7 +2,7 @@
 
 Serve **nvidia/Gemma-4-26B-A4B-NVFP4** via vLLM on an NVIDIA DGX Spark (GB10, `sm_121`), with an OpenAI-compatible endpoint ready for agentic / tool-calling workloads.
 
-The launcher script (`run-gemma4-26b-a4b-spark.sh`) at the repo root handles:
+The launcher script (`run-gemma4-26b-a4b-spark.sh`) handles:
 
 1. **Pre-staging weights** into a host-mounted HF cache (download once, reuse across restarts)
 2. **Launching vLLM** in a Docker container, tuned for Spark's unified-memory profile
@@ -87,6 +87,36 @@ Tool calling and reasoning are **on by default**, configured per the [vLLM Gemma
 - At 128 K context, full-precision KV fits ~2–3 full-context sequences; fp8 fits ~5 — hence `max-num-seqs=4`
 - `torch.compile` (Dynamo + Inductor) took ~35 s on first boot; persisted to `VLLM_CACHE` so subsequent restarts skip it
 - Default generation config (`temperature=1.0`, `top_k=64`, `top_p=0.95`) is set by the model's `generation_config.json`; pass a lower temperature per-request for reliable tool calling
+
+## Benchmarking
+
+`benchmark-gemma4.sh` runs a [GuideLLM](https://github.com/neuralmagic/guidellm) suite against the live server. Four runs bracket the system from best-case latency to saturation:
+
+| # | Name | Profile | Shape | Purpose |
+|---|---|---|---|---|
+| 1 | **floor** | synchronous | ~8K in / ~1K out | Best-case TTFT/ITL with zero contention |
+| 2 | **operating** | concurrent 1,2,4 | ~8K in / ~1K out + 2K shared prefix | Realistic agentic load, prefix-cache warm |
+| 3 | **ceiling** | throughput | ~8K in / ~1K out, no prefix | Max sustained token throughput, cache-cold |
+| 4 | **large** | concurrent 1,2,4 | ~32K in / ~512 out, no prefix | Prefill TTFT + KV capacity at high context |
+
+```bash
+pip install guidellm
+
+export API_KEY=sk-...          # key printed by run-gemma4-26b-a4b-spark.sh
+./benchmark-gemma4.sh          # all four runs
+./benchmark-gemma4.sh 2        # just the operating/SLO run
+./benchmark-gemma4.sh floor large  # subset, in order
+```
+
+Results are written as JSON to `./guidellm-results/`. Override the output directory with `OUT_DIR=...`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_KEY` | _(required)_ | Bearer token from the server |
+| `TARGET` | `http://localhost:8000` | vLLM server base URL |
+| `MODEL` | `nvidia/Gemma-4-26B-A4B-NVFP4` | Model ID sent to GuideLLM |
+| `PROCESSOR` | same as `MODEL` | Tokenizer for synthetic data generation |
+| `OUT_DIR` | `./guidellm-results` | Directory for JSON result files |
 
 ## Container management
 
