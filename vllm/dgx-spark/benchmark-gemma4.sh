@@ -100,17 +100,19 @@ run_operating() {  # 2 — concurrent 1/2/4 with shared prefix + prefix caching
     --output-path "$OUT_DIR/2_operating_concurrent.json"
 }
 
-run_ceiling() {  # 3 — throughput, cache-cold (no shared prefix)
-  # All requests in parallel to find max sustained token throughput. With
-  # max-num-seqs=4 the server admits 4 and queues the rest, so this also shows
-  # where queueing latency explodes — your saturation point.
-  echo "==> CEILING: max throughput (cache-cold, no prefix)"
+run_ceiling() {  # 3 — throughput sweep, cache-cold (no shared prefix)
+  # Sweep request rates to find max sustained throughput and where queueing
+  # latency blows up. GuideLLM's throughput profile requires an explicit --rate;
+  # sweeping 1,2,4,8 brackets the Spark's max-num-seqs=4 ceiling and shows the
+  # saturation knee.
+  echo "==> CEILING: throughput sweep 1,2,4,8 req/s (cache-cold, no prefix)"
   guidellm benchmark \
     --target "$TARGET" \
     --model "$MODEL" \
     --processor "$PROCESSOR" \
     --backend-kwargs "$BACKEND_KWARGS" \
     --profile throughput \
+    --rate 1,2,4,8 \
     --warmup 0.1 \
     --cooldown 0.1 \
     --max-seconds 180 \

@@ -96,7 +96,7 @@ Tool calling and reasoning are **on by default**, configured per the [vLLM Gemma
 |---|---|---|---|---|
 | 1 | **floor** | synchronous | ~8K in / ~1K out | Best-case TTFT/ITL with zero contention |
 | 2 | **operating** | concurrent 1,2,4 | ~8K in / ~1K out + 2K shared prefix | Realistic agentic load, prefix-cache warm |
-| 3 | **ceiling** | throughput | ~8K in / ~1K out, no prefix | Max sustained token throughput, cache-cold |
+| 3 | **ceiling** | throughput 1,2,4,8 req/s | ~8K in / ~1K out, no prefix | Rate sweep to find throughput ceiling and saturation knee, cache-cold |
 | 4 | **large** | concurrent 1,2,4 | ~32K in / ~512 out, no prefix | Prefill TTFT + KV capacity at high context |
 
 ```bash
