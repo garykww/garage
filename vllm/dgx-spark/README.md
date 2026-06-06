@@ -1,6 +1,100 @@
 # dgx-spark
 
-Serve **nvidia/Gemma-4-26B-A4B-NVFP4** via vLLM on an NVIDIA DGX Spark (GB10, `sm_121`), with an OpenAI-compatible endpoint ready for agentic / tool-calling workloads.
+vLLM launch scripts for NVIDIA DGX Spark (GB10, `sm_121`), with OpenAI-compatible endpoints ready for agentic / tool-calling workloads.
+
+| Script | Model | Notes |
+|---|---|---|
+| `run-gemma4-26b-a4b-spark.sh` | `nvidia/Gemma-4-26B-A4B-NVFP4` | Docker-based, HF-hosted weights, agentic tool calling |
+| `serve-qwen36-35b-a3b-dflash.sh` | `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | Docker-based, DFlash speculative decoding |
+
+---
+
+## serve.sh
+
+A generic Docker wrapper around `vllm serve`, shared by all model scripts. Adapted from `run-gemma4-26b-a4b-spark.sh` — same lifecycle: pre-stage weights, `docker run -d`, stream load logs while waiting for readiness, pre-warm the JIT. All vLLM flags are forwarded verbatim; no model-specific logic lives here.
+
+```
+bash serve.sh <model> [vllm serve flags...]
+```
+
+The image's ENTRYPOINT is the NVIDIA wrapper; `vllm serve` is passed explicitly as the command.
+
+Script-level env vars (not forwarded to vLLM):
+
+| Variable | Default | Description |
+|---|---|---|
+| `IMAGE` | `ghcr.io/spark-arena/dgx-vllm-eugr-nightly` | vLLM Docker image |
+| `CONTAINER_NAME` | `vllm-serve` | Docker container name |
+| `PORT` | `8000` | Host port; maps to container-internal port 8000 |
+| `BIND_ADDR` | `0.0.0.0` | Host bind address; set to `127.0.0.1` to restrict to local only |
+| `API_KEY` | auto-generated | Bearer token; auto-generated if unset so endpoint is never unauthenticated |
+| `HF_TOKEN` | _(empty)_ | HuggingFace token for gated models |
+| `HF_CACHE` | `~/.cache/huggingface` | Host HF weight cache |
+| `VLLM_CACHE` | `~/.cache/vllm` | Host torch.compile cache; persisted across restarts so the ~35s compile is paid once |
+| `SHM_SIZE` | _(empty)_ | If set (e.g. `16g`), uses `--shm-size` instead of `--ipc=host` for `/dev/shm` |
+| `SKIP_PRESTAGE` | `0` | Set to `1` to skip weight pre-staging |
+
+---
+
+## Qwen3.6-35B-A3B-NVFP4 (DFlash)
+
+**RedHatAI/Qwen3.6-35B-A3B-NVFP4** with DFlash speculative decoding via **z-lab/Qwen3.6-35B-A3B-DFlash**.
+
+The launcher (`serve-qwen36-35b-a3b-dflash.sh`):
+
+1. **Pre-stages** the DFlash draft model into the host HF cache (`serve.sh` handles the main model)
+2. **Delegates to `serve.sh`** with all recommended flags pre-set
+
+### Image
+
+DFlash (`method: dflash` in `--speculative-config`) is native upstream vLLM — no custom patches needed. Default image: `ghcr.io/spark-arena/dgx-vllm-eugr-nightly`.
+
+### Requirements
+
+- NVIDIA DGX Spark (GB10 / `sm_121`) with the NVIDIA container runtime
+- Docker with `--gpus all` support
+- `HF_TOKEN` set (gated models)
+- `curl` (readiness check and warm-up)
+
+### Quick start
+
+```bash
+export HF_TOKEN=hf_xxx
+bash serve-qwen36-35b-a3b-dflash.sh
+```
+
+```
+Ready.    http://localhost:8000/v1
+Metrics:  http://localhost:8000/metrics
+Logs:     docker logs -f vllm-qwen36
+```
+
+Examples:
+
+```bash
+BIND_ADDR=127.0.0.1 API_KEY=sk-mykey bash serve-qwen36-35b-a3b-dflash.sh
+SKIP_PRESTAGE=1 bash serve-qwen36-35b-a3b-dflash.sh
+```
+
+### Performance notes (DGX Spark, GB10)
+
+- `gpu-memory-utilization=0.70` — reduced from 0.85 to leave headroom for the draft model's activations and KV cache
+- `max-num-seqs=4` — Spark bandwidth ceiling
+- `max-num-batched-tokens=32768` — keeps the prefill pipeline fed while the drafter runs ahead
+
+### Container management
+
+```bash
+docker logs -f vllm-qwen36
+docker stop vllm-qwen36
+docker rm vllm-qwen36
+```
+
+---
+
+## Gemma-4-26B-A4B-NVFP4
+
+Serve **nvidia/Gemma-4-26B-A4B-NVFP4** via vLLM in a Docker container with automatic weight pre-staging from HuggingFace.
 
 The launcher script (`run-gemma4-26b-a4b-spark.sh`) handles:
 
@@ -39,7 +133,7 @@ All knobs are environment variables — pass them inline or `export` before runn
 |---|---|---|
 | `MODEL` | `nvidia/Gemma-4-26B-A4B-NVFP4` | HuggingFace model ID |
 | `SERVED_NAME` | same as `MODEL` | Model ID reported to API clients |
-| `IMAGE` | `vllm/vllm-openai:cu130-nightly` | vLLM Docker image |
+| `IMAGE` | `ghcr.io/spark-arena/dgx-vllm-eugr-nightly` | vLLM Docker image |
 | `PORT` | `8000` | Host port to publish |
 | `BIND_ADDR` | `0.0.0.0` | Host interface; set to `127.0.0.1` to restrict to local only |
 | `API_KEY` | auto-generated | Bearer token for request auth; pin this for stable key across restarts |
