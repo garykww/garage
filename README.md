@@ -21,6 +21,28 @@ garage/
 └── ...
 ```
 
+## Checking Out a Single App
+
+To clone only one app folder without downloading the entire repo:
+
+```bash
+git clone --filter=blob:none --sparse https://github.com/garykww/garage.git
+cd garage
+git sparse-checkout set vllm
+```
+
+To add another app folder to an existing sparse checkout:
+
+```bash
+git sparse-checkout add another-app-name
+```
+
+To go back to a full checkout:
+
+```bash
+git sparse-checkout disable
+```
+
 ## Adding a New App
 
 1. Create a top-level folder (prefer kebab-case, no spaces).
