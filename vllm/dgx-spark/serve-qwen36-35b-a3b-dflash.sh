@@ -23,7 +23,10 @@ fi
 
 # Default container name for this model; override with CONTAINER_NAME=...
 export CONTAINER_NAME="${CONTAINER_NAME:-vllm-qwen36}"
-# z-lab recommends --shm-size=16g over --ipc=host for this image
+# z-lab recommends --shm-size=16g over --ipc=host for this image. On the Spark's
+# unified memory this tmpfs is a lazy cap, not a reservation (single GB10 = no
+# cross-GPU NCCL transfer, so actual /dev/shm use is small); --ipc=host is an
+# equivalent alternative with no memory advantage either way.
 export SHM_SIZE="${SHM_SIZE:-16g}"
 
 args=(
@@ -32,9 +35,15 @@ args=(
     # Canonical HF ID so API clients use it in the model field without remapping
     --served-model-name RedHatAI/Qwen3.6-35B-A3B-NVFP4
 
-    # Lower than the no-speculative baseline (0.85) to leave room for the DFlash
-    # draft model's activations and KV cache alongside the target model
-    --gpu-memory-utilization 0.60
+    # vLLM loads the target weights (~20 GB NVFP4), the 0.5B DFlash drafter
+    # (~1 GB), and the KV cache all *inside* this fraction — the drafter and its
+    # KV contend with the target KV cache here, they are not allocated outside
+    # it. So this cap is about leaving host headroom on the 128 GB unified pool
+    # (GMU fraction + /dev/shm + OS all share it), not about "making room" for
+    # the drafter. 0.80 (~102 GB) sits just below the 0.85 no-speculative
+    # baseline to absorb the larger prefill activation set from the 32K batched
+    # tokens below, while leaving ~26 GB for the host.
+    --gpu-memory-utilization 0.80
 
     # 128K context for long agent histories and tool schemas
     --max-model-len 131072
@@ -42,9 +51,12 @@ args=(
     # Spark bandwidth ceiling; >4 concurrent decode streams spikes TTFT
     --max-num-seqs 4
 
-    # Conservative prefill chunk size; keeps steps short so the drafter isn't
-    # starved during long prefills
-    --max-num-batched-tokens 4096
+    # z-lab's recommended prefill chunk for this pair: larger chunks raise
+    # prefill throughput and give the drafter more context per step, at the cost
+    # of an ~8x larger activation working set (the main reason GMU is 0.80, not
+    # higher) and potentially higher TTFT under concurrency on bandwidth-bound
+    # Spark
+    --max-num-batched-tokens 32768
 
     # Checkpoint ships no KV scaling factors so fp8 falls back to scale=1.0;
     # auto lets vLLM pick full precision to preserve accuracy on long agent loops
@@ -74,9 +86,11 @@ args=(
     # GPUDirect Storage accelerated weight loading — faster cold start from NVMe
     --load-format fastsafetensors
 
-    # DFlash speculative decoding; 8 draft tokens per step for better acceptance
-    # rate under higher concurrency
-    --speculative-config "{\"method\":\"dflash\",\"num_speculative_tokens\":8,\"model\":\"${DRAFT_MODEL}\"}"
+    # DFlash speculative decoding; 15 draft tokens per step is z-lab's
+    # recommended block depth for this pair. DFlash drafts the whole block in one
+    # bidirectional pass; deeper blocks widen the verification batch and add a
+    # little draft KV (minor memory).
+    --speculative-config "{\"method\":\"dflash\",\"num_speculative_tokens\":15,\"model\":\"${DRAFT_MODEL}\"}"
 )
 
 exec bash "$(dirname "$0")/serve.sh" "${args[@]}" "$@"

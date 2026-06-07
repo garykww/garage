@@ -78,9 +78,13 @@ SKIP_PRESTAGE=1 bash serve-qwen36-35b-a3b-dflash.sh
 
 ### Performance notes (DGX Spark, GB10)
 
-- `gpu-memory-utilization=0.60` — reduced from 0.85 to leave headroom for the draft model's activations and KV cache alongside the target model
+Memory budget on the 128 GB **unified** pool (shared by the GPU's `gpu-memory-utilization` fraction, the container's `/dev/shm`, and the host OS): NVFP4 target weights ~20 GB, the **0.5B DFlash drafter ~1 GB**, the rest of the fraction is KV cache.
+
+- `gpu-memory-utilization=0.80` — vLLM loads the target weights, the DFlash drafter, **and** the KV cache all *inside* this fraction; the drafter and its KV contend with the target KV cache here, they are not allocated outside it. The cap (below the 0.85 no-speculative baseline) exists to leave host headroom on the unified pool and to absorb the larger prefill activation set from 32K batched tokens — **not** to "make room" for the ~1 GB drafter.
+- `num_speculative_tokens=15` — z-lab's recommended DFlash block depth for this pair; deeper blocks widen the verification batch and add a little draft KV.
 - `max-num-seqs=4` — Spark bandwidth ceiling; >4 concurrent decode streams spikes TTFT
-- `max-num-batched-tokens=4096` — conservative prefill chunk size so the drafter isn't starved during long prefills
+- `max-num-batched-tokens=32768` — z-lab's recommended prefill chunk; raises prefill throughput and gives the drafter more context, at the cost of an ~8× larger activation working set and potentially higher TTFT under concurrency
+- `kv-cache-dtype=auto` — full-precision KV (this checkpoint ships no fp8 KV scales); ~2× the fp8 size per token, the main KV-capacity cost
 
 ### Container management
 
