@@ -6,6 +6,7 @@ vLLM launch scripts for NVIDIA DGX Spark (GB10, `sm_121`), with OpenAI-compatibl
 |---|---|---|
 | `run-gemma4-26b-a4b-spark.sh` | `nvidia/Gemma-4-26B-A4B-NVFP4` | Docker-based, HF-hosted weights, agentic tool calling |
 | `serve-qwen36-35b-a3b-dflash.sh` | `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | Docker-based, DFlash speculative decoding |
+| `serve-nemotron3-super-120b-a12b-nvfp4.sh` | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | Docker-based, hybrid Mamba+MoE, MTP speculative decoding, 1M context |
 
 ---
 
@@ -33,6 +34,8 @@ Script-level env vars (not forwarded to vLLM):
 | `VLLM_CACHE` | `~/.cache/vllm` | Host torch.compile cache; persisted across restarts so the ~35s compile is paid once |
 | `SHM_SIZE` | _(empty)_ | If set (e.g. `16g`), uses `--shm-size` instead of `--ipc=host` for `/dev/shm` |
 | `SKIP_PRESTAGE` | `0` | Set to `1` to skip weight pre-staging |
+| `VLLM_DOCKER_ENV` | _(empty)_ | Extra container env vars (space/newline-separated `KEY=VALUE`) → `-e KEY=VALUE`; for engine tuning a recipe needs at runtime |
+| `EXTRA_MOUNTS` | _(empty)_ | Extra bind mounts (space/newline-separated `SRC:DST`) → `-v SRC:DST`; for mounting files (e.g. a parser plugin) into the serving container |
 
 ---
 
@@ -81,7 +84,8 @@ SKIP_PRESTAGE=1 bash serve-qwen36-35b-a3b-dflash.sh
 Memory budget on the 128 GB **unified** pool (shared by the GPU's `gpu-memory-utilization` fraction, the container's `/dev/shm`, and the host OS): NVFP4 target weights ~20 GB, the **0.5B DFlash drafter ~1 GB**, the rest of the fraction is KV cache.
 
 - `gpu-memory-utilization=0.80` — vLLM loads the target weights, the DFlash drafter, **and** the KV cache all *inside* this fraction; the drafter and its KV contend with the target KV cache here, they are not allocated outside it. The cap (below the 0.85 no-speculative baseline) exists to leave host headroom on the unified pool and to absorb the larger prefill activation set from 32K batched tokens — **not** to "make room" for the ~1 GB drafter.
-- `num_speculative_tokens=15` — z-lab's recommended DFlash block depth for this pair; deeper blocks widen the verification batch and add a little draft KV.
+- `max-model-len=49152` — capped to the **measured** KV cache, not the model's 128K ceiling. At this config the live KV pool is ~58.6K tokens (full-precision `auto` KV + the 32K prefill activation set consume the rest of the fraction), so advertising 131072 would let a single request run out of KV around ~58K tokens. 48K fits one full request with headroom for a second concurrent stream; raise only if KV capacity grows (fp8 KV, smaller `max-num-batched-tokens`, or higher GMU).
+- `num_speculative_tokens=15` — z-lab's recommended DFlash block depth for this pair; deeper blocks widen the verification batch and add a little draft KV. Live acceptance ~3.4 accepted tokens/step (≈4.4 tokens per target forward).
 - `max-num-seqs=4` — Spark bandwidth ceiling; >4 concurrent decode streams spikes TTFT
 - `max-num-batched-tokens=32768` — z-lab's recommended prefill chunk; raises prefill throughput and gives the drafter more context, at the cost of an ~8× larger activation working set and potentially higher TTFT under concurrency
 - `kv-cache-dtype=auto` — full-precision KV (this checkpoint ships no fp8 KV scales); ~2× the fp8 size per token, the main KV-capacity cost
@@ -92,6 +96,72 @@ Memory budget on the 128 GB **unified** pool (shared by the GPU's `gpu-memory-ut
 docker logs -f vllm-qwen36
 docker stop vllm-qwen36
 docker rm vllm-qwen36
+```
+
+---
+
+## Nemotron-3-Super-120B-A12B-NVFP4
+
+**nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4** — a ~120B-total / ~12B-active hybrid **Mamba-2 + latent-MoE** model with **MTP (Multi-Token Prediction) speculative decoding** baked into the checkpoint. Flags follow NVIDIA's [official Nemotron 3 Super DGX Spark guide](https://docs.nvidia.com/nemotron/nightly/usage-cookbook/Nemotron-3-Super/SparkDeploymentGuide/README.html).
+
+The launcher (`serve-nemotron3-super-120b-a12b-nvfp4.sh`):
+
+1. **Downloads the `super_v3` reasoning-parser plugin** from the model repo (it ships there, not in the image) and caches it on the host
+2. **Delegates to `serve.sh`**, passing the parser plugin via `EXTRA_MOUNTS` and the NVFP4 engine env vars via `VLLM_DOCKER_ENV`
+
+### Image
+
+Default `ghcr.io/spark-arena/dgx-vllm-eugr-nightly` — the patched DGX Spark image. **Stock vLLM containers fail with "illegal instruction" on NVFP4/GB10**, so the patched image (or `VLLM_NVFP4_GEMM_BACKEND=marlin`, which this script sets) is required.
+
+### Requirements
+
+- NVIDIA DGX Spark (GB10 / `sm_121`) with the NVIDIA container runtime
+- Docker with `--gpus all` support
+- `HF_TOKEN` set — the model **and** its parser-plugin `/raw/` download are gated
+- `curl` (parser download, readiness check, warm-up)
+
+### Quick start
+
+```bash
+export HF_TOKEN=hf_xxx
+bash serve-nemotron3-super-120b-a12b-nvfp4.sh
+```
+
+```
+Ready.    http://localhost:8000/v1
+Metrics:  http://localhost:8000/metrics
+Logs:     docker logs -f vllm-nemotron3-super
+```
+
+Examples:
+
+```bash
+# Drop to a shorter context for more decode concurrency headroom
+MAX_MODEL_LEN=262144 bash serve-nemotron3-super-120b-a12b-nvfp4.sh
+
+# Disable MTP speculative decoding (e.g. if startup OOMs on the spec-decode state)
+NO_MTP=1 bash serve-nemotron3-super-120b-a12b-nvfp4.sh
+```
+
+### Performance / config notes (DGX Spark, GB10)
+
+The 128 GB **unified** pool is shared by the `gpu-memory-utilization` fraction, `/dev/shm`, and the host OS.
+
+- `gpu-memory-utilization=0.90` — per the official guide; NVFP4 weights + Mamba SSM state + KV cache all live inside this fraction
+- `max-model-len=1000000` — 1M context is affordable here because the model is **mostly Mamba-2**: those layers carry a constant-size SSM state instead of length-growing KV, so only the few attention layers populate the KV cache. `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` (set by the script) permits it; lower `MAX_MODEL_LEN` for more concurrency headroom
+- `kv-cache-dtype=fp8` — required to fit the long context in the unified pool (unlike the Gemma/Qwen recipes, which use full-precision KV)
+- `mamba_ssm_cache_dtype=float32` — the SSM state stays fp32 for stability, separate from the fp8 attention KV
+- `quantization=fp4` + `moe-backend=marlin` — marlin is the FP4 MoE backend that runs on GB10
+- MTP speculative decoding (`speculative_config method=mtp`, 3 tokens) is **on by default**; the draft layer is in the checkpoint so the extra KV/latency is one layer per predicted token. Some users hit MTP+NVFP4 OOM on other GPUs — use `NO_MTP=1` if startup fails allocating the spec-decode state
+- `max-num-seqs=4` — Spark bandwidth ceiling; >4 concurrent decode streams spikes TTFT
+- Agentic: `--tool-call-parser qwen3_coder` + the mounted `super_v3` reasoning parser plugin
+
+### Container management
+
+```bash
+docker logs -f vllm-nemotron3-super
+docker stop vllm-nemotron3-super
+docker rm vllm-nemotron3-super
 ```
 
 ---

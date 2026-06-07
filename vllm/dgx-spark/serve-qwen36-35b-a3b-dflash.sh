@@ -45,8 +45,14 @@ args=(
     # tokens below, while leaving ~26 GB for the host.
     --gpu-memory-utilization 0.80
 
-    # 128K context for long agent histories and tool schemas
-    --max-model-len 131072
+    # Capped to fit the measured KV cache, not the model's 128K ceiling. At this
+    # config the live KV pool is ~58.6K tokens (3665 blocks x 16) because
+    # full-precision KV (auto) and the 32K prefill activation set leave that much
+    # of the GMU fraction for cache; advertising 131072 there means a single
+    # request runs out of KV around ~58K tokens. 48K fits one full request with
+    # headroom for a second concurrent stream. Raise only if KV capacity grows
+    # (fp8 KV, smaller max-num-batched-tokens, or higher GMU).
+    --max-model-len 49152
 
     # Spark bandwidth ceiling; >4 concurrent decode streams spikes TTFT
     --max-num-seqs 4
