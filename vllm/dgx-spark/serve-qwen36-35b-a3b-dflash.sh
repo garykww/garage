@@ -80,9 +80,6 @@ args=(
     # Strips and surfaces the <think> reasoning block separately from the response
     --reasoning-parser qwen3
 
-    # Enables thinking/reasoning mode in the chat template at the tokenizer level
-    --chat-template '{"thinking": true}'
-
     # GPUDirect Storage accelerated weight loading — faster cold start from NVMe
     --load-format fastsafetensors
 
