@@ -75,7 +75,7 @@ args=(
     --enable-auto-tool-choice
 
     # Qwen3 Coder tool-call serialization format; must match the model's output
-    --tool-call-parser qwen_coder
+    --tool-call-parser qwen3_coder
 
     # Strips and surfaces the <think> reasoning block separately from the response
     --reasoning-parser qwen3
