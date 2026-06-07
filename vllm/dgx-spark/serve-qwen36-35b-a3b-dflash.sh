@@ -38,35 +38,32 @@ args=(
     # vLLM loads the target weights (~20 GB NVFP4), the 0.5B DFlash drafter
     # (~1 GB), and the KV cache all *inside* this fraction — the drafter and its
     # KV contend with the target KV cache here, they are not allocated outside
-    # it. So this cap is about leaving host headroom on the 128 GB unified pool
-    # (GMU fraction + /dev/shm + OS all share it), not about "making room" for
-    # the drafter. 0.80 (~102 GB) sits just below the 0.85 no-speculative
-    # baseline to absorb the larger prefill activation set from the 32K batched
-    # tokens below, while leaving ~26 GB for the host.
-    --gpu-memory-utilization 0.80
+    # it. 0.85 (~109 GB) maximizes the KV pool to reach the 64K context below;
+    # the remaining ~19 GB suffices for the host because single-GPU /dev/shm use
+    # is small and the 16g shm cap is lazy (not a reservation).
+    --gpu-memory-utilization 0.85
 
-    # Capped to fit the measured KV cache, not the model's 128K ceiling. At this
-    # config the live KV pool is ~58.6K tokens (3665 blocks x 16) because
-    # full-precision KV (auto) and the 32K prefill activation set leave that much
-    # of the GMU fraction for cache; advertising 131072 there means a single
-    # request runs out of KV around ~58K tokens. 48K fits one full request with
-    # headroom for a second concurrent stream. Raise only if KV capacity grows
-    # (fp8 KV, smaller max-num-batched-tokens, or higher GMU).
-    --max-model-len 49152
+    # 64K context. Reachable because fp8 KV (below) ~doubles the per-token cache
+    # and GMU 0.85 enlarges the pool: full-precision auto KV only yielded a
+    # ~58.6K-token pool (a single request ran out of KV before 128K), whereas
+    # fp8 + 0.85 gives ~125K tokens — 64K fits with room for a 2nd stream.
+    --max-model-len 65536
 
     # Spark bandwidth ceiling; >4 concurrent decode streams spikes TTFT
     --max-num-seqs 4
 
     # z-lab's recommended prefill chunk for this pair: larger chunks raise
     # prefill throughput and give the drafter more context per step, at the cost
-    # of an ~8x larger activation working set (the main reason GMU is 0.80, not
-    # higher) and potentially higher TTFT under concurrency on bandwidth-bound
-    # Spark
+    # of an ~8x larger activation working set and potentially higher TTFT under
+    # concurrency on bandwidth-bound Spark
     --max-num-batched-tokens 32768
 
-    # Checkpoint ships no KV scaling factors so fp8 falls back to scale=1.0;
-    # auto lets vLLM pick full precision to preserve accuracy on long agent loops
-    --kv-cache-dtype auto
+    # fp8 KV ~halves cache bytes/token, ~doubling the KV pool so 64K context fits
+    # on the 128 GB unified box. The checkpoint ships no KV scaling factors, so
+    # --calculate-kv-scales computes them on the fly during prefill rather than
+    # falling back to scale=1.0 (which would risk fp8 overflow / accuracy loss).
+    --kv-cache-dtype fp8
+    --calculate-kv-scales
 
     # Required for Qwen3.6's custom modelling code
     --trust-remote-code

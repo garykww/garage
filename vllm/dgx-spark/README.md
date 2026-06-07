@@ -83,12 +83,12 @@ SKIP_PRESTAGE=1 bash serve-qwen36-35b-a3b-dflash.sh
 
 Memory budget on the 128 GB **unified** pool (shared by the GPU's `gpu-memory-utilization` fraction, the container's `/dev/shm`, and the host OS): NVFP4 target weights ~20 GB, the **0.5B DFlash drafter ~1 GB**, the rest of the fraction is KV cache.
 
-- `gpu-memory-utilization=0.80` — vLLM loads the target weights, the DFlash drafter, **and** the KV cache all *inside* this fraction; the drafter and its KV contend with the target KV cache here, they are not allocated outside it. The cap (below the 0.85 no-speculative baseline) exists to leave host headroom on the unified pool and to absorb the larger prefill activation set from 32K batched tokens — **not** to "make room" for the ~1 GB drafter.
-- `max-model-len=49152` — capped to the **measured** KV cache, not the model's 128K ceiling. At this config the live KV pool is ~58.6K tokens (full-precision `auto` KV + the 32K prefill activation set consume the rest of the fraction), so advertising 131072 would let a single request run out of KV around ~58K tokens. 48K fits one full request with headroom for a second concurrent stream; raise only if KV capacity grows (fp8 KV, smaller `max-num-batched-tokens`, or higher GMU).
+- `gpu-memory-utilization=0.85` — vLLM loads the target weights, the DFlash drafter, **and** the KV cache all *inside* this fraction; the drafter and its KV contend with the target KV cache here, they are not allocated outside it. 0.85 (~109 GB) maximizes the KV pool to reach 64K context; the ~19 GB left suffices for the host because single-GPU `/dev/shm` use is small and the 16g shm cap is lazy.
+- `kv-cache-dtype=fp8` + `calculate-kv-scales` — fp8 ~halves KV bytes/token, ~doubling the pool so 64K fits on the 128 GB box. Full-precision `auto` only yielded a ~58.6K-token pool (a single request ran out of KV before 128K). The checkpoint ships no KV scales, so `--calculate-kv-scales` computes them on the fly during prefill instead of falling back to `scale=1.0` (which risks fp8 overflow / accuracy loss). Small accuracy cost in exchange for the larger context.
+- `max-model-len=65536` — 64K, reachable because fp8 KV + GMU 0.85 give a ~125K-token pool; 64K fits with room for a second concurrent stream.
 - `num_speculative_tokens=15` — z-lab's recommended DFlash block depth for this pair; deeper blocks widen the verification batch and add a little draft KV. Live acceptance ~3.4 accepted tokens/step (≈4.4 tokens per target forward).
 - `max-num-seqs=4` — Spark bandwidth ceiling; >4 concurrent decode streams spikes TTFT
 - `max-num-batched-tokens=32768` — z-lab's recommended prefill chunk; raises prefill throughput and gives the drafter more context, at the cost of an ~8× larger activation working set and potentially higher TTFT under concurrency
-- `kv-cache-dtype=auto` — full-precision KV (this checkpoint ships no fp8 KV scales); ~2× the fp8 size per token, the main KV-capacity cost
 
 ### Container management
 
