@@ -6,6 +6,7 @@ vLLM launch scripts for NVIDIA DGX Spark (GB10, `sm_121`), with OpenAI-compatibl
 |---|---|---|
 | `run-gemma4-26b-a4b-spark.sh` | `nvidia/Gemma-4-26B-A4B-NVFP4` | Docker-based, HF-hosted weights, agentic tool calling |
 | `serve-qwen36-35b-a3b-dflash.sh` | `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | Docker-based, DFlash speculative decoding |
+| `serve-diffusiongemma-26b-a4b.sh` | `RedHatAI/diffusiongemma-26B-A4B-it-NVFP4` | Docker-based, diffusion decoding (V2 model runner) |
 
 ---
 
@@ -33,6 +34,7 @@ Script-level env vars (not forwarded to vLLM):
 | `VLLM_CACHE` | `~/.cache/vllm` | Host torch.compile cache; persisted across restarts so the ~35s compile is paid once |
 | `SHM_SIZE` | _(empty)_ | If set (e.g. `16g`), uses `--shm-size` instead of `--ipc=host` for `/dev/shm` |
 | `SKIP_PRESTAGE` | `0` | Set to `1` to skip weight pre-staging |
+| `EXTRA_ENV` | _(empty)_ | Space-separated `KEY=VALUE` pairs forwarded into the serving container (e.g. `VLLM_USE_V2_MODEL_RUNNER=1`) |
 
 ---
 
@@ -92,6 +94,45 @@ Memory budget on the 128 GB **unified** pool (shared by the GPU's `gpu-memory-ut
 docker logs -f vllm-qwen36
 docker stop vllm-qwen36
 docker rm vllm-qwen36
+```
+
+---
+
+## diffusiongemma-26B-A4B-it-NVFP4
+
+**RedHatAI/diffusiongemma-26B-A4B-it-NVFP4** — a diffusion-decoding Gemma variant. Instead of autoregressive token-by-token decode, blocks are denoised bidirectionally, so it requires:
+
+- `VLLM_USE_V2_MODEL_RUNNER=1` — diffusion decoding is only implemented in the V2 model runner (passed into the container via `serve.sh`'s `EXTRA_ENV`)
+- `--attention-backend TRITON_ATTN` — the backend that supports the bidirectional diffusion decode path
+- `--trust-remote-code` — custom modelling code
+
+The launcher (`serve-diffusiongemma-26b-a4b.sh`) sets these plus:
+
+- `--max-num-seqs 4` — Spark bandwidth ceiling; >4 concurrent decode streams spikes TTFT
+- `--hf-overrides '{"diffusion_sampler": "entropy_bound", "diffusion_entropy_bound": 0.1}'` — entropy-bound sampler: stops denoising a block early once per-token entropy drops below 0.1, instead of running a fixed step count
+- `--default-chat-template-kwargs '{"enable_thinking": true}'` — thinking mode on by default; clients can override per-request
+
+### Quick start
+
+```bash
+export HF_TOKEN=hf_xxx
+bash serve-diffusiongemma-26b-a4b.sh
+```
+
+```
+Ready.    http://localhost:8000/v1
+Metrics:  http://localhost:8000/metrics
+Logs:     docker logs -f vllm-dgemma
+```
+
+All `serve.sh` env vars apply (`BIND_ADDR`, `API_KEY`, `PORT`, `SKIP_PRESTAGE`, ...). Container name defaults to `vllm-dgemma`.
+
+### Container management
+
+```bash
+docker logs -f vllm-dgemma
+docker stop vllm-dgemma
+docker rm vllm-dgemma
 ```
 
 ---

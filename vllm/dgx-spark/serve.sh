@@ -18,6 +18,8 @@
 #   VLLM_CACHE     Host torch.compile cache (default: ~/.cache/vllm); persisted across
 #                  restarts so the compile is paid once, not every boot
 #   SKIP_PRESTAGE  Set to 1 to skip weight pre-staging (weights already cached)
+#   EXTRA_ENV      Space-separated KEY=VALUE pairs forwarded into the serving
+#                  container (e.g. EXTRA_ENV="VLLM_USE_V2_MODEL_RUNNER=1")
 
 set -euo pipefail
 
@@ -35,6 +37,7 @@ BIND_ADDR="${BIND_ADDR:-0.0.0.0}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 VLLM_CACHE="${VLLM_CACHE:-$HOME/.cache/vllm}"
 SKIP_PRESTAGE="${SKIP_PRESTAGE:-0}"
+EXTRA_ENV="${EXTRA_ENV:-}"  # space-separated KEY=VALUE pairs, forwarded as -e flags
 
 # API key: auto-generate if not set so the endpoint is never unauthenticated.
 # Pin API_KEY=... across restarts for a stable key.
@@ -93,6 +96,12 @@ else
     IPC_FLAGS=(--ipc=host)
 fi
 
+# Extra container env vars (EXTRA_ENV is intentionally word-split on spaces).
+ENV_FLAGS=()
+for kv in $EXTRA_ENV; do
+    ENV_FLAGS+=(-e "$kv")
+done
+
 docker run -d \
     --name "$CONTAINER_NAME" \
     "${IPC_FLAGS[@]}" \
@@ -100,6 +109,7 @@ docker run -d \
     --gpus all \
     -p "${BIND_ADDR}:${PORT}:8000" \
     -e HF_TOKEN="${HF_TOKEN:-}" \
+    ${ENV_FLAGS[@]+"${ENV_FLAGS[@]}"} \
     -v "${HF_CACHE}:/root/.cache/huggingface" \
     -v "${VLLM_CACHE}:/root/.cache/vllm" \
     "$IMAGE" \
