@@ -10,6 +10,36 @@ export CONTAINER_NAME="${CONTAINER_NAME:-vllm-dgemma}"
 # the V1 runner rejects the architecture at startup.
 export EXTRA_ENV="VLLM_USE_V2_MODEL_RUNNER=1 ${EXTRA_ENV:-}"
 
+# ---- Agentic flags -----------------------------------------------------------
+# DiffusionGemma supports structured tool use and a reasoning channel, but
+# neither Google's developer guide nor the RedHatAI card documents vLLM parser
+# names for it. It shares Gemma 4's 26B-A4B architecture and reasoning-channel
+# format, so we default to the Gemma 4 recipe's parsers + tool chat template.
+# UNVERIFIED for this model: on first run, send a request with a tool schema and
+# confirm the response contains parsed tool_calls (not inline text).
+# The model's bundled chat template is used as-is (no --chat-template override)
+# so --default-chat-template-kwargs applies and clients can override per-request;
+# set CHAT_TEMPLATE=examples/tool_chat_template_gemma4.jinja only if the bundled
+# template's tool formatting turns out broken.
+# Disable entirely with AGENTIC=0, or override TOOL_PARSER / REASONING_PARSER.
+AGENTIC="${AGENTIC:-1}"
+TOOL_PARSER="${TOOL_PARSER:-gemma4}"
+REASONING_PARSER="${REASONING_PARSER:-gemma4}"
+CHAT_TEMPLATE="${CHAT_TEMPLATE:-}"
+
+AGENTIC_FLAGS=()
+if [[ "$AGENTIC" != "0" ]]; then
+    if [[ -n "$TOOL_PARSER" ]]; then
+        AGENTIC_FLAGS+=(--enable-auto-tool-choice --tool-call-parser "$TOOL_PARSER")
+    fi
+    if [[ -n "$REASONING_PARSER" ]]; then
+        AGENTIC_FLAGS+=(--reasoning-parser "$REASONING_PARSER")
+    fi
+    if [[ -n "$CHAT_TEMPLATE" ]]; then
+        AGENTIC_FLAGS+=(--chat-template "$CHAT_TEMPLATE")
+    fi
+fi
+
 args=(
     "$MODEL"
 
@@ -38,4 +68,4 @@ args=(
     --default-chat-template-kwargs '{"enable_thinking": true}'
 )
 
-exec bash "$(dirname "$0")/serve.sh" "${args[@]}" "$@"
+exec bash "$(dirname "$0")/serve.sh" "${args[@]}" ${AGENTIC_FLAGS[@]+"${AGENTIC_FLAGS[@]}"} "$@"

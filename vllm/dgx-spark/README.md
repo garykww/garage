@@ -112,6 +112,17 @@ The launcher (`serve-diffusiongemma-26b-a4b.sh`) sets these plus:
 - `--hf-overrides '{"diffusion_sampler": "entropy_bound", "diffusion_entropy_bound": 0.1}'` — entropy-bound sampler: stops denoising a block early once per-token entropy drops below 0.1, instead of running a fixed step count
 - `--default-chat-template-kwargs '{"enable_thinking": true}'` — thinking mode on by default; clients can override per-request
 
+### Agentic serving (on by default, UNVERIFIED parsers)
+
+DiffusionGemma supports structured tool use and a reasoning channel, but no official doc names vLLM parsers for it. Since it shares Gemma 4's architecture and reasoning-channel format, the launcher defaults to the Gemma 4 recipe's parsers:
+
+- `--enable-auto-tool-choice --tool-call-parser gemma4`
+- `--reasoning-parser gemma4`
+
+The model's bundled chat template is used as-is (no `--chat-template` override), so `--default-chat-template-kwargs '{"enable_thinking": true}'` applies and clients can override `enable_thinking` per-request.
+
+**Verify on first run:** send a request with a tool schema and confirm the response contains parsed `tool_calls` (not inline text), and that thinking lands in `reasoning_content`. Knobs: `AGENTIC=0` disables agentic serving; `TOOL_PARSER` / `REASONING_PARSER` override the parsers; set `CHAT_TEMPLATE=examples/tool_chat_template_gemma4.jinja` only if the bundled template's tool formatting turns out broken (note that template may not accept the `enable_thinking` kwarg).
+
 ### Quick start
 
 ```bash
