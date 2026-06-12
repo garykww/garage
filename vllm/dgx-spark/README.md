@@ -10,42 +10,16 @@ vLLM launch scripts for NVIDIA DGX Spark (GB10, `sm_121`), with OpenAI-compatibl
 
 ---
 
-## serve.sh
-
-A generic Docker wrapper around `vllm serve`, shared by all model scripts. Adapted from `run-gemma4-26b-a4b-spark.sh` — same lifecycle: pre-stage weights, `docker run -d`, stream load logs while waiting for readiness, pre-warm the JIT. All vLLM flags are forwarded verbatim; no model-specific logic lives here.
-
-```
-bash serve.sh <model> [vllm serve flags...]
-```
-
-The image's ENTRYPOINT is the NVIDIA wrapper; `vllm serve` is passed explicitly as the command.
-
-Script-level env vars (not forwarded to vLLM):
-
-| Variable | Default | Description |
-|---|---|---|
-| `IMAGE` | `ghcr.io/spark-arena/dgx-vllm-eugr-nightly` | vLLM Docker image |
-| `CONTAINER_NAME` | `vllm-serve` | Docker container name |
-| `PORT` | `8000` | Host port; maps to container-internal port 8000 |
-| `BIND_ADDR` | `0.0.0.0` | Host bind address; set to `127.0.0.1` to restrict to local only |
-| `API_KEY` | auto-generated | Bearer token; auto-generated if unset so endpoint is never unauthenticated |
-| `HF_TOKEN` | _(empty)_ | HuggingFace token for gated models |
-| `HF_CACHE` | `~/.cache/huggingface` | Host HF weight cache |
-| `VLLM_CACHE` | `~/.cache/vllm` | Host torch.compile cache; persisted across restarts so the ~35s compile is paid once |
-| `SHM_SIZE` | _(empty)_ | If set (e.g. `16g`), uses `--shm-size` instead of `--ipc=host` for `/dev/shm` |
-| `SKIP_PRESTAGE` | `0` | Set to `1` to skip weight pre-staging |
-| `EXTRA_ENV` | _(empty)_ | Space-separated `KEY=VALUE` pairs forwarded into the serving container (e.g. `VLLM_USE_V2_MODEL_RUNNER=1`) |
-
----
-
 ## Qwen3.6-35B-A3B-NVFP4 (DFlash)
 
 **RedHatAI/Qwen3.6-35B-A3B-NVFP4** with DFlash speculative decoding via **z-lab/Qwen3.6-35B-A3B-DFlash**.
 
-The launcher (`serve-qwen36-35b-a3b-dflash.sh`):
+The launcher (`serve-qwen36-35b-a3b-dflash.sh`) is self-contained and handles:
 
-1. **Pre-stages** the DFlash draft model into the host HF cache (`serve.sh` handles the main model)
-2. **Delegates to `serve.sh`** with all recommended flags pre-set
+1. **Pre-staging** both the target weights and the DFlash draft model into a host-mounted HF cache (download once, reuse across restarts)
+2. **Launching vLLM** in a Docker container with all recommended flags pre-set, tuned for Spark's unified-memory profile
+3. **Waiting for readiness**, streaming container logs while the safetensor load completes
+4. **Pre-warming the JIT** so the first real request doesn't eat cold-start compilation
 
 ### Image
 
@@ -80,13 +54,14 @@ SKIP_PRESTAGE=1 bash serve-qwen36-35b-a3b-dflash.sh
 
 ### Performance notes (DGX Spark, GB10)
 
-Memory budget on the 128 GB **unified** pool (shared by the GPU's `gpu-memory-utilization` fraction, the container's `/dev/shm`, and the host OS): NVFP4 target weights ~20 GB, the **0.5B DFlash drafter ~1 GB**, the rest of the fraction is KV cache.
+Memory budget on the 128 GB **unified** pool (shared by the GPU's `gpu-memory-utilization` fraction, the container's `/dev/shm`, and the host OS): NVFP4 target weights ~20 GB, the **0.5B DFlash drafter ~1 GB**, the rest of the fraction is KV cache. The defaults below are sized to **share the box with a second model side-by-side**; override them to run this model alone (see the examples above).
 
-- `gpu-memory-utilization=0.80` — vLLM loads the target weights, the DFlash drafter, **and** the KV cache all *inside* this fraction; the drafter and its KV contend with the target KV cache here, they are not allocated outside it. The cap (below the 0.85 no-speculative baseline) exists to leave host headroom on the unified pool and to absorb the larger prefill activation set from 32K batched tokens — **not** to "make room" for the ~1 GB drafter.
+- `gpu-memory-utilization=0.45` — vLLM loads the target weights, the DFlash drafter, **and** the KV cache all *inside* this fraction; the drafter and its KV contend with the target KV cache here, they are not allocated outside it. 0.45 (~58 GB) is sized so two models fit the 128 GB pool (2 × ~0.45 leaves host headroom), leaving a ~36 GB KV pool. Raise toward 0.85 (~109 GB) to run this model alone with a larger context.
+- `kv-cache-dtype=fp8` + `calculate-kv-scales` — fp8 ~halves KV bytes/token, ~doubling the pool so 32K fits in the reduced fraction. The checkpoint ships no KV scales, so `--calculate-kv-scales` computes them on the fly during prefill instead of falling back to `scale=1.0` (which risks fp8 overflow / accuracy loss).
+- `max-model-len=32768` — 32K, scaled to the smaller pool: the ~36 GB fp8 KV pool holds ~52K tokens (vs ~125K at GMU 0.85), so 32K fits one full-context stream with headroom for a partial second.
 - `num_speculative_tokens=15` — z-lab's recommended DFlash block depth for this pair; deeper blocks widen the verification batch and add a little draft KV.
-- `max-num-seqs=4` — Spark bandwidth ceiling; >4 concurrent decode streams spikes TTFT
-- `max-num-batched-tokens=32768` — z-lab's recommended prefill chunk; raises prefill throughput and gives the drafter more context, at the cost of an ~8× larger activation working set and potentially higher TTFT under concurrency
-- `kv-cache-dtype=auto` — full-precision KV (this checkpoint ships no fp8 KV scales); ~2× the fp8 size per token, the main KV-capacity cost
+- `max-num-seqs=2` — matches the ~52K-token KV pool (~1.5 full-context 32K streams); also well under Spark's bandwidth ceiling where >4 decode streams spike TTFT.
+- `max-num-batched-tokens=16384` — prefill chunk halved alongside the pool to shrink the activation working set; still raises prefill throughput and gives the drafter context per step, at a smaller peak footprint.
 
 ### Container management
 
@@ -102,7 +77,7 @@ docker rm vllm-qwen36
 
 **RedHatAI/diffusiongemma-26B-A4B-it-NVFP4** — a diffusion-decoding Gemma variant. Instead of autoregressive token-by-token decode, blocks are denoised bidirectionally, so it requires:
 
-- `VLLM_USE_V2_MODEL_RUNNER=1` — diffusion decoding is only implemented in the V2 model runner (passed into the container via `serve.sh`'s `EXTRA_ENV`)
+- `VLLM_USE_V2_MODEL_RUNNER=1` — diffusion decoding is only implemented in the V2 model runner (set directly by the launcher)
 - `--attention-backend TRITON_ATTN` — the backend that supports the bidirectional diffusion decode path
 - `--trust-remote-code` — custom modelling code
 
@@ -136,7 +111,7 @@ Metrics:  http://localhost:8000/metrics
 Logs:     docker logs -f vllm-dgemma
 ```
 
-All `serve.sh` env vars apply (`BIND_ADDR`, `API_KEY`, `PORT`, `SKIP_PRESTAGE`, ...). Container name defaults to `vllm-dgemma`.
+Standard launcher env vars apply (`BIND_ADDR`, `API_KEY`, `PORT`, `SKIP_PRESTAGE`, ...). Container name defaults to `vllm-dgemma`.
 
 ### Container management
 
