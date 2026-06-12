@@ -11,7 +11,18 @@
 #   2. Launch the long-running OpenAI-compatible server, agentic-ready by default.
 #   3. Stream load logs, wait for readiness, then warm the JIT before first use.
 #
-# Configured for: 128K context, agentic/tool-calling workloads, single Spark.
+# Configured for: 64K context, agentic/tool-calling workloads, HALF the Spark's
+# unified pool (GPU_MEM_UTIL=0.45) so a second vLLM instance can run alongside.
+#
+# Running two instances side by side:
+#   - The second instance needs its own PORT (both launchers default to 8000)
+#     and CONTAINER_NAME (this script's default vllm-dgemma already differs
+#     from the gemma4 launcher's vllm-gemma4).
+#   - The NEIGHBOR must also cap its memory: run-gemma4-26b-a4b-spark.sh still
+#     defaults to GPU_MEM_UTIL=0.85, so launch it with GPU_MEM_UTIL=0.45 (and
+#     correspondingly reduced MAX_MODEL_LEN/MAX_NUM_SEQS) or the two instances
+#     overcommit the 128GB pool. --gpu-memory-utilization is a per-process
+#     fraction of TOTAL memory; vLLM does not coordinate across processes.
 #
 # ----------------------------------------------------------------------------
 # DiffusionGemma-specific decisions (and why):
@@ -72,11 +83,15 @@ HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 # (the compiled graph is keyed to the model/flags/GPU, so it's reused).
 VLLM_CACHE="${VLLM_CACHE:-$HOME/.cache/vllm}"
 
-# Serving knobs tuned for Spark's unified-memory / small-batch profile.
-GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"   # fraction of the 128GB unified pool for vLLM
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"  # 128K context
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"      # Spark bandwidth ceiling; >4 concurrent decode streams spikes TTFT
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-16384}"  # prefill chunk size; near Spark's SM-bound prefill plateau
+# Serving knobs sized for HALF the unified pool, so two vLLM instances can run
+# side by side on one Spark. Budget at 0.45: ~57.6 GiB total for this instance;
+# weights take ~18 GiB, leaving a ~35 GiB KV pool. Full-precision KV runs
+# ~240 KiB/token here, so that pool holds ~150K tokens — two full 64K-context
+# sequences fit with headroom (128K context would fit only ONE sequence).
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.45}"   # fraction of the 128GB unified pool; 0.45 leaves room for a second instance
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"   # 64K context; 2 full-context seqs fit the reduced KV pool
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"      # 2 x 64K = ~128K KV tokens vs ~150K available — no preemption thrash
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"  # prefill chunk size; halved with concurrency so a long prefill doesn't starve the other stream
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
 # Safetensors load strategy (a `vllm serve` engine arg, applied at weight LOAD
 # time). unset/empty = lazy mmap (best for Spark's local NVMe); 'prefetch' or
