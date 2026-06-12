@@ -15,9 +15,9 @@
 # unified pool (GPU_MEM_UTIL=0.45) so a second vLLM instance can run alongside.
 #
 # Running two instances side by side:
-#   - The second instance needs its own PORT (both launchers default to 8000)
-#     and CONTAINER_NAME (this script's default vllm-dgemma already differs
-#     from the gemma4 launcher's vllm-gemma4).
+#   - This script defaults to PORT=8001 so it can coexist with the gemma4
+#     launcher's default 8000; CONTAINER_NAME (vllm-dgemma) likewise already
+#     differs from the gemma4 launcher's vllm-gemma4.
 #   - The NEIGHBOR must also cap its memory: run-gemma4-26b-a4b-spark.sh still
 #     defaults to GPU_MEM_UTIL=0.85, so launch it with GPU_MEM_UTIL=0.45 (and
 #     correspondingly reduced MAX_MODEL_LEN/MAX_NUM_SEQS) or the two instances
@@ -55,7 +55,7 @@ set -euo pipefail
 MODEL="${MODEL:-RedHatAI/diffusiongemma-26B-A4B-it-NVFP4}"
 SERVED_NAME="${SERVED_NAME:-$MODEL}"   # default: clients use the full model path as the id
 IMAGE="${IMAGE:-vllm/vllm-openai:gemma}"
-PORT="${PORT:-8000}"
+PORT="${PORT:-8001}"  # 8001 so the gemma4 launcher (8000) can run alongside
 # Host interface to publish the port on. 0.0.0.0 = reachable from other machines
 # on the network (default). Set to 127.0.0.1 to restrict to this host only.
 BIND_ADDR="${BIND_ADDR:-0.0.0.0}"
