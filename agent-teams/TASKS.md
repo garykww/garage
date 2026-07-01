@@ -1,12 +1,15 @@
 # Task List
 
-Every task is tagged with the module it belongs to (`[inventory]` or
-`[billing]`). The `lead` agent reads this file, routes each open task to the
-subagent that owns that module (`inventory-code-agent` or `billing-code-agent`), and
-checks tasks off as the owning agent reports them done. Tasks tagged for
-different modules have no shared state, so the lead can dispatch them
-concurrently; tasks tagged for the same module are handed to that module's
-single owner one at a time.
+Every task is tagged with the module it belongs to. `[inventory]` and
+`[billing]` route to their permanent owners, `inventory-code-agent` and
+`billing-code-agent`. Any other module tag (an existing directory, or a new
+one this task should create) routes to a fresh, module-scoped session of
+`code-agent` — see "Dispatching code-agent sessions" in
+`.claude/agents/lead.md`. The `lead` agent reads this file, routes each open
+task to whichever agent owns its module, and checks tasks off as the owning
+agent/session reports them done. Tasks tagged for different modules have no
+shared state, so the lead can dispatch them concurrently; tasks tagged for
+the same module are handed to that module's single owner one at a time.
 
 A task can also be tagged `[inventory+billing]` when it genuinely needs both
 modules to change. Neither `inventory-code-agent` nor `billing-code-agent` is allowed
@@ -32,6 +35,41 @@ tasks" in `.claude/agents/lead.md` for how it splits these instead.
       returned. Flagged by `security-auditor` during the `AddLineItem`
       validation review as low/medium severity, not blocking. Consider
       integer cents or a decimal type, plus sane upper bounds.
+- [ ] [shipping] `EstimateCost` (`shipping/shipping.go:55-61`) doesn't
+      validate `ratePerKg` or the shipment's `Weight` — a negative rate or a
+      shipment created with negative weight produces a negative cost with no
+      error. `shipping` has no named owner, so this routes to a fresh
+      `code-agent` session scoped to `shipping/`. `shipping_test.go` has an
+      explicit "no coverage yet for EstimateCost()" placeholder comment
+      confirming the gap.
+- [ ] [catalog] `UpdatePrice` (`catalog/catalog.go:37-43`) doesn't validate
+      `price` — it accepts a negative price and stores it unchanged, with no
+      error. `catalog` has no named owner, so this routes to a fresh
+      `code-agent` session scoped to `catalog/`. `catalog_test.go` has an
+      explicit "no coverage yet for UpdatePrice()" placeholder comment
+      confirming the gap.
+- [ ] [notifications] `IncrementRetry` (`notifications/notifications.go:46-53`)
+      doesn't validate `by` — a negative `by` silently decrements
+      `RetryCount`, including below zero, with no error. `notifications` has
+      no named owner, so this routes to a fresh `code-agent` session scoped
+      to `notifications/`. `notifications_test.go` has an explicit "no
+      coverage yet for IncrementRetry()" placeholder comment confirming the
+      gap.
+- [ ] [reporting] `AverageMetric` (`reporting/reporting.go:43-53`) divides by
+      `len(rep.Metrics)` with no check for zero metrics, so a report with no
+      metrics set returns `NaN` with a nil error instead of an error.
+      `reporting` has no named owner, so this routes to a fresh `code-agent`
+      session scoped to `reporting/`. `reporting_test.go` only covers
+      reports with metrics already set — the zero-metrics case that
+      triggers the bug isn't tested.
+- [ ] [loyalty] `RedeemPoints` (`loyalty/loyalty.go:47-54`) doesn't validate
+      `points` — it accepts a non-positive value or a value greater than the
+      account's current balance, silently driving `Points` negative with no
+      error (unlike `EarnPoints`, which already validates and is tested for
+      it). `loyalty` has no named owner, so this routes to a fresh
+      `code-agent` session scoped to `loyalty/`. `loyalty_test.go` has an
+      explicit "no coverage yet for RedeemPoints()" placeholder comment
+      confirming the gap.
 
 ## Completed
 
@@ -82,7 +120,10 @@ tasks" in `.claude/agents/lead.md` for how it splits these instead.
 
 ## Adding a new task
 
-Append a line under **Open** as `- [ ] [module] description`. The module tag
-must match an existing top-level module directory (`inventory` or `billing`)
-so the lead can route it — tasks for a module with no owning agent will be
-left unassigned.
+Append a line under **Open** as `- [ ] [module] description`. `[inventory]`
+and `[billing]` go to their named owners. Any other module name routes to a
+`code-agent` session scoped to that module — the directory doesn't need to
+exist yet if the task is to create it. A tag that isn't a plausible
+directory name at all (not existing, not something a new module could
+reasonably be called) will be flagged by the lead as unowned instead of
+routed.
