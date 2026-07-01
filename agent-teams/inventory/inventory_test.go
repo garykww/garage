@@ -119,5 +119,76 @@ func TestCheckout(t *testing.T) {
 	}
 }
 
-// No coverage yet for Sell() or ApplyPricingFormula() — left for the
-// agent team to find and fill in.
+func TestSell(t *testing.T) {
+	tests := []struct {
+		name      string
+		startQty  int
+		sellQty   int
+		wantErr   bool
+		wantStock int
+		wantRev   float64
+	}{
+		{
+			name:      "successful sale decrements stock",
+			startQty:  5,
+			sellQty:   2,
+			wantErr:   false,
+			wantStock: 3,
+			wantRev:   20,
+		},
+		{
+			name:      "qty greater than stock is rejected, stock unchanged",
+			startQty:  5,
+			sellQty:   6,
+			wantErr:   true,
+			wantStock: 5,
+		},
+		{
+			name:      "zero qty is rejected, stock unchanged",
+			startQty:  5,
+			sellQty:   0,
+			wantErr:   true,
+			wantStock: 5,
+		},
+		{
+			name:      "negative qty is rejected, stock unchanged",
+			startQty:  5,
+			sellQty:   -1,
+			wantErr:   true,
+			wantStock: 5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inv := New()
+			inv.AddItem("sku-1", "Widget", 10, tt.startQty)
+
+			revenue, err := inv.Sell("sku-1", tt.sellQty)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (revenue: %f)", revenue)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if revenue != tt.wantRev {
+					t.Fatalf("expected revenue %f, got %f", tt.wantRev, revenue)
+				}
+			}
+
+			item, err := inv.Get("sku-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if item.Qty != tt.wantStock {
+				t.Fatalf("expected stock %d, got %d", tt.wantStock, item.Qty)
+			}
+		})
+	}
+}
+
+// No coverage yet for ApplyPricingFormula() — left for the agent team to
+// find and fill in.

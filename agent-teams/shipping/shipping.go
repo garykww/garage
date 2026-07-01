@@ -51,11 +51,19 @@ func (r *Registry) MarkDelivered(id string) error {
 }
 
 // EstimateCost returns the shipping cost for a shipment at the given rate
-// per kilogram.
+// per kilogram. It returns an error if ratePerKg is negative or if the
+// shipment's Weight is negative, rather than silently producing a negative
+// cost.
 func (r *Registry) EstimateCost(id string, ratePerKg float64) (float64, error) {
 	s, err := r.Get(id)
 	if err != nil {
 		return 0, err
+	}
+	if ratePerKg < 0 {
+		return 0, fmt.Errorf("invalid ratePerKg: %f is negative", ratePerKg)
+	}
+	if s.Weight < 0 {
+		return 0, fmt.Errorf("invalid shipment weight: %f is negative", s.Weight)
 	}
 	return s.Weight * ratePerKg, nil
 }

@@ -7,6 +7,7 @@ package billing
 import (
 	"fmt"
 	"html/template"
+	"math"
 	"strings"
 )
 
@@ -21,11 +22,28 @@ type LineItem struct {
 
 // Invoice tracks the line items billed to a single Customer under one ID,
 // along with its current Status (e.g. "open" or "paid").
+//
+// The line items themselves are deliberately unexported: LineItem values may
+// only be constructed through AddLineItem/AddSaleLineItem, which validate
+// Amount and Qty before they can ever land in an invoice's total. If the
+// slice were exported, any caller holding an *Invoice could append a
+// malformed LineItem (e.g. Amount: math.Inf(1)) directly, bypassing that
+// validation entirely. Use the LineItems method to read a safe copy.
 type Invoice struct {
 	ID        string
 	Customer  string
-	LineItems []LineItem
+	lineItems []LineItem
 	Status    string
+}
+
+// LineItems returns a copy of the invoice's line items. Callers may read or
+// hold the returned slice freely; mutating it (or appending to it) has no
+// effect on the invoice itself. To add a line item, use
+// Ledger.AddLineItem or Ledger.AddSaleLineItem instead.
+func (inv *Invoice) LineItems() []LineItem {
+	items := make([]LineItem, len(inv.lineItems))
+	copy(items, inv.lineItems)
+	return items
 }
 
 // Ledger is an in-memory store of invoices, keyed by invoice ID. The zero
@@ -48,9 +66,12 @@ func (l *Ledger) CreateInvoice(id, customer string) *Invoice {
 	return inv
 }
 
-// Get looks up the invoice with the given id. It returns an error if no
-// invoice with that id has been created.
-func (l *Ledger) Get(id string) (*Invoice, error) {
+// get returns the ledger's live, mutable *Invoice for internal use by
+// Ledger's own methods (AddLineItem, MarkPaid, Total, RenderInvoiceHTML).
+// It is unexported on purpose: only code inside this package may obtain the
+// live pointer, so external callers can never mutate a stored invoice's
+// fields directly — see Get for the safe, exported alternative.
+func (l *Ledger) get(id string) (*Invoice, error) {
 	inv, ok := l.invoices[id]
 	if !ok {
 		return nil, fmt.Errorf("unknown invoice: %s", id)
@@ -58,22 +79,66 @@ func (l *Ledger) Get(id string) (*Invoice, error) {
 	return inv, nil
 }
 
+// Get looks up the invoice with the given id and returns a copy of it. It
+// returns an error if no invoice with that id has been created.
+//
+// The returned *Invoice is a copy, not the ledger's stored invoice: mutating
+// its fields, or the slice returned by its LineItems method, has no effect
+// on the invoice held by the ledger. This closes off a bypass where a caller
+// could otherwise take the pointer returned here and append a malformed,
+// unvalidated LineItem straight into the invoice, sidestepping
+// AddLineItem/AddSaleLineItem's validation entirely. Use
+// AddLineItem/AddSaleLineItem/MarkPaid to make changes.
+func (l *Ledger) Get(id string) (*Invoice, error) {
+	inv, err := l.get(id)
+	if err != nil {
+		return nil, err
+	}
+	cp := *inv
+	cp.lineItems = append([]LineItem(nil), inv.lineItems...)
+	return &cp, nil
+}
+
+// MaxLineItemAmount is the largest per-unit price accepted by AddLineItem and
+// AddSaleLineItem. It bounds the magnitude of any single caller-supplied
+// value so that Total's integer-cents accumulation (see Total) stays well
+// within int64 range and can never be pushed toward +Inf or lose precision,
+// even across many line items on one invoice. Values above this bound (or
+// non-finite values: NaN, +Inf, -Inf) are rejected with an error and no line
+// item is added.
+const MaxLineItemAmount = 1_000_000_000 // e.g. $1,000,000,000 per unit
+
+// MaxLineItemQty is the largest quantity accepted by AddLineItem and
+// AddSaleLineItem, for the same overflow/precision reasons as
+// MaxLineItemAmount.
+const MaxLineItemQty = 1_000_000
+
 // AddLineItem appends a line item to the invoice identified by invoiceID.
-// amount is the per-unit price and must not be negative; qty must be
-// greater than zero. Either violation returns a descriptive error and adds
-// no line item.
+// amount is the per-unit price and must be a finite number in the range
+// [0, MaxLineItemAmount]; qty must be an integer in the range
+// (0, MaxLineItemQty]. Any violation returns a descriptive error and adds no
+// line item.
 func (l *Ledger) AddLineItem(invoiceID, description string, amount float64, qty int) error {
-	inv, err := l.Get(invoiceID)
+	inv, err := l.get(invoiceID)
 	if err != nil {
 		return err
+	}
+	if math.IsNaN(amount) || math.IsInf(amount, 0) {
+		return fmt.Errorf("invalid amount for line item %q: %v, must be a finite number", description, amount)
 	}
 	if amount < 0 {
 		return fmt.Errorf("invalid amount for line item %q: %v, must be >= 0", description, amount)
 	}
+	if amount > MaxLineItemAmount {
+		return fmt.Errorf("invalid amount for line item %q: %v, must be <= %v", description, amount, MaxLineItemAmount)
+	}
 	if qty <= 0 {
 		return fmt.Errorf("invalid qty for line item %q: %d, must be > 0", description, qty)
 	}
-	inv.LineItems = append(inv.LineItems, LineItem{Description: description, Amount: amount, Qty: qty})
+	if qty > MaxLineItemQty {
+		return fmt.Errorf("invalid qty for line item %q: %d, must be <= %d", description, qty, MaxLineItemQty)
+	}
+	inv.lineItems = append(inv.lineItems, LineItem{Description: description, Amount: amount, Qty: qty})
 	return nil
 }
 
@@ -85,32 +150,71 @@ func (l *Ledger) AddLineItem(invoiceID, description string, amount float64, qty 
 //
 // unitPrice is the PER-UNIT price, not a pre-computed total — it is stored
 // as-is in LineItem.Amount, and Total() multiplies Amount by Qty when
-// summing the invoice. quantity must be greater than zero and unitPrice
-// must not be negative; either violation returns an error and no line item
-// is added.
+// summing the invoice. quantity must be an integer in the range
+// (0, MaxLineItemQty], and unitPrice must be a finite number in the range
+// [0, MaxLineItemAmount]; any violation returns an error and no line item is
+// added.
 func (l *Ledger) AddSaleLineItem(invoiceID string, itemID string, quantity int, unitPrice float64) error {
 	if quantity <= 0 {
 		return fmt.Errorf("invalid quantity for item %s: %d, must be > 0", itemID, quantity)
 	}
+	if quantity > MaxLineItemQty {
+		return fmt.Errorf("invalid quantity for item %s: %d, must be <= %d", itemID, quantity, MaxLineItemQty)
+	}
+	if math.IsNaN(unitPrice) || math.IsInf(unitPrice, 0) {
+		return fmt.Errorf("invalid unit price for item %s: %v, must be a finite number", itemID, unitPrice)
+	}
 	if unitPrice < 0 {
 		return fmt.Errorf("invalid unit price for item %s: %v, must be >= 0", itemID, unitPrice)
+	}
+	if unitPrice > MaxLineItemAmount {
+		return fmt.Errorf("invalid unit price for item %s: %v, must be <= %v", itemID, unitPrice, MaxLineItemAmount)
 	}
 	description := fmt.Sprintf("Item %s", itemID)
 	return l.AddLineItem(invoiceID, description, unitPrice, quantity)
 }
 
 // Total computes the current sum of Amount * Qty across all of the
-// invoice's line items. It returns an error if the invoice does not exist.
+// invoice's line items. It returns an error if the invoice does not exist,
+// or if summing the invoice's line items would overflow the internal int64
+// cent accumulator (see below) — in either case the returned float64 is 0
+// and must be ignored.
+//
+// Internally, each line item's Amount is rounded to the nearest cent and
+// accumulated as an int64 cent count rather than summed as float64 dollars.
+// Naively summing float64 dollar amounts accumulates binary rounding error
+// as more line items are added (the classic 0.1 + 0.2 != 0.3 problem);
+// rounding once per line item and then doing the summation in integer cents
+// avoids that drift entirely, at the cost of assuming Amount never needs
+// more than cent-level precision — true for ordinary currency values.
+//
+// Each individual line item's contribution to the running total is bounded
+// well within int64 range by MaxLineItemAmount/MaxLineItemQty (worst case
+// ~1e17 per item, vs. int64 max ~9.2e18). But an invoice can hold an
+// unbounded *number* of line items, and ~93 max-magnitude items would be
+// enough to silently wrap the running total past int64 max — Go integer
+// overflow is silent, not a panic, so without a check it would produce a
+// negative or otherwise garbage total instead of an error. The loop below
+// detects that condition (every line item's contribution is >= 0, since
+// AddLineItem/AddSaleLineItem reject negative amounts, so the running total
+// should only ever increase; if it doesn't, it wrapped) and fails loudly
+// instead.
 func (l *Ledger) Total(invoiceID string) (float64, error) {
-	inv, err := l.Get(invoiceID)
+	inv, err := l.get(invoiceID)
 	if err != nil {
 		return 0, err
 	}
-	total := 0.0
-	for _, li := range inv.LineItems {
-		total += li.Amount * float64(li.Qty)
+	var totalCents int64
+	for _, li := range inv.lineItems {
+		cents := int64(math.Round(li.Amount * 100))
+		itemCents := cents * int64(li.Qty)
+		newTotal := totalCents + itemCents
+		if itemCents > 0 && newTotal < totalCents {
+			return 0, fmt.Errorf("invoice %s total overflowed while summing %d line items", invoiceID, len(inv.lineItems))
+		}
+		totalCents = newTotal
 	}
-	return total, nil
+	return float64(totalCents) / 100, nil
 }
 
 // ApplyLateFee charges a late fee of feePercent percent of the invoice's
@@ -136,7 +240,7 @@ func (l *Ledger) ApplyLateFee(invoiceID string, feePercent float64) (float64, er
 // MarkPaid sets the invoice's Status to "paid". It returns an error if the
 // invoice does not exist.
 func (l *Ledger) MarkPaid(invoiceID string) error {
-	inv, err := l.Get(invoiceID)
+	inv, err := l.get(invoiceID)
 	if err != nil {
 		return err
 	}
@@ -167,12 +271,12 @@ type renderLineItem struct {
 // each line item's description — are HTML-escaped via html/template so they
 // cannot inject markup or script into the rendered output.
 func (l *Ledger) RenderInvoiceHTML(invoiceID string) (string, error) {
-	inv, err := l.Get(invoiceID)
+	inv, err := l.get(invoiceID)
 	if err != nil {
 		return "", err
 	}
-	items := make([]renderLineItem, len(inv.LineItems))
-	for i, li := range inv.LineItems {
+	items := make([]renderLineItem, len(inv.lineItems))
+	for i, li := range inv.lineItems {
 		items[i] = renderLineItem{
 			Description: li.Description,
 			AmountStr:   fmt.Sprintf("%.2f", li.Amount),

@@ -25,5 +25,33 @@ func TestMarkShippedAndDelivered(t *testing.T) {
 	}
 }
 
-// No coverage yet for EstimateCost() — left for the agent team to find and
-// fill in.
+func TestEstimateCost(t *testing.T) {
+	r := NewRegistry()
+	r.CreateShipment("ship-1", "order-1", "UPS", 2.5)
+
+	cost, err := r.EstimateCost("ship-1", 4.0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cost != 10.0 {
+		t.Fatalf("expected cost 10.0, got %v", cost)
+	}
+}
+
+func TestEstimateCostNegativeRatePerKg(t *testing.T) {
+	r := NewRegistry()
+	r.CreateShipment("ship-1", "order-1", "UPS", 2.5)
+
+	if _, err := r.EstimateCost("ship-1", -4.0); err == nil {
+		t.Fatal("expected error for negative ratePerKg, got nil")
+	}
+}
+
+func TestEstimateCostNegativeWeight(t *testing.T) {
+	r := NewRegistry()
+	r.CreateShipment("ship-1", "order-1", "UPS", -2.5)
+
+	if _, err := r.EstimateCost("ship-1", 4.0); err == nil {
+		t.Fatal("expected error for negative shipment weight, got nil")
+	}
+}

@@ -199,3 +199,192 @@ already had comments) — left those untouched. Ran
 billing and inventory packages pass, confirming no accidental cross-module
 edits). Did not touch billing_test.go or inventory/.
 **Result:** done
+
+## 2026-07-01 23:00 — Fix Total() rounding drift and add upper bounds to AddLineItem/AddSaleLineItem
+**Assigned by:** lead (TASKS.md [billing] item, flagged by `security-auditor`
+during the `AddLineItem` validation review, low/medium severity, not
+blocking).
+**Findings:** `Total` (billing/billing.go:104-114, pre-change) summed
+`li.Amount * float64(li.Qty)` directly into a `float64` accumulator across
+all line items — ordinary binary floating-point summation, which drifts as
+more line items are added (classic `0.1 + 0.2 != 0.3` class of bug).
+Separately, neither `AddLineItem` (billing.go:65) nor `AddSaleLineItem`
+(billing.go:91) enforced any upper bound on `amount`/`qty`/`unitPrice`/
+`quantity`, and did not reject non-finite values — a caller passing
+`math.Inf(1)` for `amount` would pass the existing `amount < 0` check (since
+`+Inf` is not `< 0`) and get stored, and `math.NaN()` would pass every
+numeric comparison silently (NaN compares false to everything), so `Total()`
+could return `+Inf` or `NaN` with no error ever returned.
+**Decision:** Rather than switching `LineItem.Amount`'s exported field type
+to an integer-cents or decimal type (a breaking API change touching every
+caller and the HTML-rendering `%.2f` formatting), mitigated the drift inside
+`Total()` only: round each line item's `Amount` to the nearest cent with
+`math.Round(li.Amount*100)`, accumulate as `int64` cents, then divide back
+to `float64` once at the end. This eliminates float-summation drift
+entirely (each term is an exact integer, summed exactly, converted back to
+float64 exactly once) at the cost of assuming line items don't need
+sub-cent precision — true for ordinary currency. Paired this with new
+exported bounds, `MaxLineItemAmount` (1e9) and `MaxLineItemQty` (1e6),
+enforced in both `AddLineItem` and `AddSaleLineItem`, plus explicit
+`math.IsNaN`/`math.IsInf` rejection (the pre-existing `< 0` checks alone
+don't catch `+Inf` or `NaN`, as noted above) — this keeps every accepted
+line item's contribution to `totalCents` bounded well within `int64` range
+(worst case per item is `1e9 * 100 * 1e6 = 1e17`, vs. `int64` max
+`~9.2e18`), so no single caller-supplied value can push `Total()` toward
+`+Inf`, `NaN`, or silent overflow. Bounding the total *count* of line items
+per invoice was out of scope for this task and not addressed.
+**Plan:** Edited billing/billing.go:
+- Added `"math"` import (billing.go:10).
+- Added exported constants `MaxLineItemAmount` and `MaxLineItemQty` with doc
+  comments (billing.go:62-74).
+- `AddLineItem` (billing.go:76-103): added `math.IsNaN`/`math.IsInf` check,
+  `amount > MaxLineItemAmount` check, and `qty > MaxLineItemQty` check;
+  updated doc comment to state the new bounds.
+- `AddSaleLineItem` (billing.go:105-135): added the same
+  NaN/Inf/upper-bound checks on `unitPrice`/`quantity`; updated doc comment.
+- `Total` (billing.go:137-160): rewrote accumulation to round each line
+  item's `Amount*100` to the nearest cent (`math.Round`), sum as `int64`,
+  and divide by 100 once at the end; expanded doc comment to explain why
+  (float-summation drift) and the precision/overflow tradeoff.
+Added tests in billing/billing_test.go:
+- `TestTotalAvoidsFloatAccumulationDrift` (new): asserts `0.1 + 0.2`
+  totals to exactly `0.3`, and that 100,000 line items of `$0.01` each sum
+  to exactly `$1000.00`. Verified both cases actually fail under the old
+  naive `float64` accumulation (checked with a standalone script): naive sum
+  gives `0.30000000000000004` (want `0.3`) and `999.9999999992356` (want
+  `1000`) respectively — confirming these are real regression tests for the
+  fix, not just precision checks that happened to already pass.
+- `TestAddLineItemValidation`: added cases for amount above
+  `MaxLineItemAmount` (rejected), amount exactly at `MaxLineItemAmount`
+  (accepted), qty above `MaxLineItemQty` (rejected), `+Inf` amount
+  (rejected), `NaN` amount (rejected).
+- `TestAddSaleLineItem`: added cases for unit price above
+  `MaxLineItemAmount` (rejected), quantity above `MaxLineItemQty`
+  (rejected), `+Inf` unit price (rejected).
+Ran `go build ./... && go vet ./... && go test ./billing/... -cover -v`
+from the repo's `agent-teams/` root — all 22 subtests pass, billing coverage
+88.2% (up from 85.5%). Also ran `go build ./... && go vet ./...` across the
+whole module (other packages have unrelated in-flight changes from other
+agents) to confirm no cross-module breakage; confirmed via `git status`/`git
+diff --stat` that my changes touch only `billing/billing.go` and
+`billing/billing_test.go`. Did not touch inventory/ or any other module.
+**Result:** done
+
+## 2026-07-01 00:00 — Close two gaps in the +Inf/NaN/overflow fix (security-auditor follow-up)
+**Assigned by:** lead, relaying a `security-auditor` finding on the previous
+entry's fix.
+**Findings:** `security-auditor` found the prior fix (bounds/finite checks
+in `AddLineItem`/`AddSaleLineItem`, int64-cents accumulation in `Total`)
+only partially closed the original +Inf/NaN/overflow finding:
+- **Gap 1 [High] (billing.go:28, 54-60, pre-fix):** `Invoice.LineItems` was
+  an exported field and `Ledger.Get` returned the ledger's live `*Invoice`
+  pointer. Any caller could do
+  `inv.LineItems = append(inv.LineItems, LineItem{Amount: math.Inf(1), Qty: 1})`
+  after calling `Get`, appending a malformed, unvalidated `LineItem`
+  straight into the stored invoice — completely bypassing
+  `AddLineItem`/`AddSaleLineItem`'s validation and reintroducing the exact
+  +Inf/NaN problem the previous fix targeted, since `Total` had no defense
+  against malformed items already sitting in the slice.
+- **Gap 2 [Medium] (billing.go:154-158, pre-fix):** `Total`'s int64-cents
+  accumulation was bounded per line item (≤ 1e9 × 100 × 1e6 = 1e17 cents),
+  but nothing capped the *number* of line items per invoice. int64 max is
+  ~9.22e18, so ~93 max-magnitude line items would silently wrap
+  `totalCents` past int64 max — Go integer overflow is silent, not a panic
+  — producing a negative or garbage total with no error.
+**Decision:**
+- Gap 1: unexported `Invoice.LineItems` to `Invoice.lineItems`, and added an
+  exported `Invoice.LineItems()` accessor method that returns a defensive
+  copy of the slice (so callers can still read line items, including from
+  `html/template`'s separate `renderLineItem` view-model path, which was
+  already unaffected since it builds its own local struct). Split `Ledger`'s
+  internal lookup into an unexported `get` (returns the live pointer, used
+  only by `Ledger`'s own methods: `AddLineItem`, `Total`, `MarkPaid`,
+  `RenderInvoiceHTML`) and the exported `Get` (returns a copy of the
+  invoice, with `lineItems` deep-copied, so mutating the returned
+  `*Invoice` — fields or line items — never reaches the ledger's stored
+  data). This closes the bypass for external callers at compile time
+  (`lineItems` isn't reachable outside the package at all) and for any
+  caller reachable via `Get` at the copy-semantics level (mutating the
+  returned pointer is a no-op on the stored invoice either way). While in
+  there, fixed a bug my own change would otherwise have introduced:
+  `MarkPaid` originally called `Get`, and once `Get` returns a copy instead
+  of the live pointer, setting `Status` on that copy would silently stop
+  persisting — routed `MarkPaid` through the new internal `get` instead so
+  the mutation still lands on the stored invoice.
+- Gap 2: chose overflow *detection* in `Total`'s accumulation loop over a
+  hard cap on line-item count (`MaxLineItems`), because a hard count cap
+  would have broken the existing, legitimate
+  `TestTotalAvoidsFloatAccumulationDrift` case (100,000 small $0.01 line
+  items, which is fine — no overflow risk at that magnitude) — the actual
+  risk is specifically about the *combination* of item count and
+  per-item magnitude, which a flat count cap can't distinguish and a
+  running-sum overflow check can. Since `AddLineItem`/`AddSaleLineItem`
+  already reject negative amounts, every line item's contribution to
+  `totalCents` is `>= 0`, so the running total should only ever increase;
+  the loop now checks `newTotal < totalCents` after each addition (a
+  standard signed-overflow tell when both addends are non-negative) and
+  returns an error instead of a silently wrapped total.
+**Plan:** Edited `billing/billing.go`:
+- `Invoice` (billing.go:23-37): unexported `LineItems` → `lineItems`; doc
+  comment explains why.
+- Added `Invoice.LineItems()` accessor (billing.go:39-47): returns a
+  defensive copy.
+- Added `Ledger.get` (billing.go:69-80, unexported, live pointer, internal
+  use only) alongside the existing `Ledger.Get` (billing.go:82-100, now
+  returns a copy with `lineItems` deep-copied); doc comments on both explain
+  the split and why it closes the bypass.
+- `AddLineItem` (billing.go:121, 141): switched to `l.get`; appends to
+  `inv.lineItems`.
+- `Total` (billing.go:177-218): switched to `l.get`; rewrote the
+  accumulation loop to detect and reject overflow (`newTotal < totalCents`
+  check) instead of a bare `+=`; expanded doc comment to explain the
+  ~93-item wraparound risk and why the check is safe (all contributions are
+  non-negative).
+- `MarkPaid` (billing.go:242-249): switched from `l.Get` to `l.get` so
+  `Status` mutations persist now that `Get` returns a copy (see Decision
+  above — this was a latent bug my own Gap-1 fix would have introduced if
+  left on `Get`).
+- `RenderInvoiceHTML` (billing.go:273-279): switched to `l.get` and
+  `inv.lineItems` (its own local `renderLineItem`/`data` view-model types
+  are unrelated to `Invoice` and needed no changes; `html/template` still
+  ranges over the local `data.LineItems` field, which was never affected by
+  this change).
+Updated `billing/billing_test.go`: replaced every direct
+`inv.LineItems`/`inv.LineItems[i]` field access with
+`inv.LineItems()`/`inv.LineItems()[i]` method calls (`TestAddLineItemValidation`,
+`TestAddSaleLineItem`, `TestApplyLateFeeValidation`) to match the new
+accessor. Added two new regression tests:
+- `TestGetReturnsCopyNotLiveInvoice`: calls `Get`, then — from inside the
+  `billing` package, the only place this compiles at all now — mutates the
+  returned `*Invoice`'s unexported `lineItems` (appending a `math.Inf(1)`
+  line item, exactly the auditor's repro) and its `Status`, then re-`Get`s
+  the invoice and checks `Total` to prove the ledger's stored invoice was
+  completely unaffected. Doc comment on the test explains why this is the
+  right thing to assert given the test file shares `package billing` (so
+  unexporting alone doesn't block it the way it would from outside the
+  package — the copy-on-`Get` semantics is what's actually being proven).
+- `TestTotalRejectsIntegerOverflowFromManyLineItems`: adds 200 line items
+  each at `MaxLineItemAmount`/`MaxLineItemQty` (well past the ~93-item
+  wraparound point) and asserts `Total` returns an error and `0`, not a
+  wrapped/garbage total.
+Ran `go build ./... && go vet ./... && go test ./billing/... -cover -v`
+from the repo's `agent-teams/` root — all tests pass (24 top-level/subtests
+across the package), coverage 88.9%. Confirmed via `git status`/`git diff
+--stat` that my changes touch only `billing/billing.go` and
+`billing/billing_test.go` (other modified files in the working tree —
+`catalog/`, `inventory/`, `loyalty/`, `notifications/`, `reporting/`,
+`shipping/`, and their logs — are pre-existing in-flight changes from other
+agents, not mine). Did not touch `inventory/` or any other module.
+**Communication:**
+- ← `security-auditor` (relayed via lead): the two-gap finding this entry
+  addresses (Gap 1 High: exported `LineItems` field + `Get` returning the
+  live pointer bypasses line-item validation; Gap 2 Medium: unbounded
+  line-item count can silently overflow `Total`'s int64 accumulator).
+- → `security-auditor`: not re-invoked for a second-opinion pass on this
+  fix — no agent-invocation tool was available in this session's toolset
+  (only file read/write/edit and bash), so I could not actually launch it.
+  Flagging this back to the lead: if a second opinion on this
+  security-sensitive fix is wanted before it's considered closed, it needs
+  to be dispatched from a session that has the capability to call
+  `security-auditor`.
+**Result:** done

@@ -45,6 +45,9 @@ func (r *Registry) AverageMetric(id string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if len(rep.Metrics) == 0 {
+		return 0, fmt.Errorf("report %s has no metrics", id)
+	}
 	total := 0.0
 	for _, v := range rep.Metrics {
 		total += v

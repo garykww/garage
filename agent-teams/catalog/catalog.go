@@ -34,10 +34,16 @@ func (r *Registry) Get(sku string) (*Product, error) {
 	return p, nil
 }
 
+// UpdatePrice sets the price of the product identified by sku. It returns
+// an error and leaves the product unmodified if the sku is unknown or if
+// price is negative.
 func (r *Registry) UpdatePrice(sku string, price float64) error {
 	p, err := r.Get(sku)
 	if err != nil {
 		return err
+	}
+	if price < 0 {
+		return fmt.Errorf("invalid price for %s: %f must not be negative", sku, price)
 	}
 	p.Price = price
 	return nil

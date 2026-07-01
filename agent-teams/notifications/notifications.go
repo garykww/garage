@@ -42,8 +42,12 @@ func (r *Registry) MarkSent(id string) error {
 }
 
 // IncrementRetry adds by to the notification's retry count and returns the
-// new count.
+// new count. It returns an error, without mutating the notification, if by
+// is negative.
 func (r *Registry) IncrementRetry(id string, by int) (int, error) {
+	if by < 0 {
+		return 0, fmt.Errorf("IncrementRetry: by must be non-negative, got %d", by)
+	}
 	n, err := r.Get(id)
 	if err != nil {
 		return 0, err

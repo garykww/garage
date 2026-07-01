@@ -27,5 +27,37 @@ func TestSearch(t *testing.T) {
 	}
 }
 
-// No coverage yet for UpdatePrice() — left for the agent team to find and
-// fill in.
+func TestUpdatePriceRejectsNegative(t *testing.T) {
+	r := NewRegistry()
+	r.AddProduct("sku-1", "Blue Widget", 19.99, nil)
+
+	err := r.UpdatePrice("sku-1", -5.00)
+	if err == nil {
+		t.Fatal("expected error for negative price, got nil")
+	}
+
+	p, err := r.Get("sku-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Price != 19.99 {
+		t.Fatalf("expected price to remain unchanged at 19.99, got %f", p.Price)
+	}
+}
+
+func TestUpdatePriceAcceptsValid(t *testing.T) {
+	r := NewRegistry()
+	r.AddProduct("sku-1", "Blue Widget", 19.99, nil)
+
+	if err := r.UpdatePrice("sku-1", 24.99); err != nil {
+		t.Fatalf("expected no error for valid price, got %v", err)
+	}
+
+	p, err := r.Get("sku-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Price != 24.99 {
+		t.Fatalf("expected price 24.99, got %f", p.Price)
+	}
+}

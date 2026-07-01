@@ -19,60 +19,49 @@ tasks" in `.claude/agents/lead.md` for how it splits these instead.
 
 ## Open
 
-- [ ] [inventory] `Sell` still doesn't validate `qty` against current stock
-      (`inventory/inventory.go:51-58` accepts `qty <= 0` and `qty` greater
-      than stock, and can drive `item.Qty` negative) despite the Completed
-      entry below claiming this was fixed. Flagged by `inventory-code-agent`
-      while building `Checkout` (which does have the guard) — `Sell` itself
-      was left untouched as out of scope for that task. Needs its own fix
-      and regression test; `inventory_test.go` has an explicit "no coverage
-      yet for Sell()" placeholder comment confirming the gap.
-- [ ] [billing] `Total`'s float64 accumulation (`billing/billing.go:104-114`)
-      is subject to standard rounding drift over many line items, and
-      neither `AddLineItem` nor `AddSaleLineItem` enforce any upper bound on
-      `amount`/`qty`/`unitPrice`/`quantity`, so a very large caller-supplied
-      value can push `Total()` toward `+Inf` or lose precision with no error
-      returned. Flagged by `security-auditor` during the `AddLineItem`
-      validation review as low/medium severity, not blocking. Consider
-      integer cents or a decimal type, plus sane upper bounds.
-- [ ] [shipping] `EstimateCost` (`shipping/shipping.go:55-61`) doesn't
-      validate `ratePerKg` or the shipment's `Weight` — a negative rate or a
-      shipment created with negative weight produces a negative cost with no
-      error. `shipping` has no named owner, so this routes to a fresh
-      `code-agent` session scoped to `shipping/`. `shipping_test.go` has an
-      explicit "no coverage yet for EstimateCost()" placeholder comment
-      confirming the gap.
-- [ ] [catalog] `UpdatePrice` (`catalog/catalog.go:37-43`) doesn't validate
-      `price` — it accepts a negative price and stores it unchanged, with no
-      error. `catalog` has no named owner, so this routes to a fresh
-      `code-agent` session scoped to `catalog/`. `catalog_test.go` has an
-      explicit "no coverage yet for UpdatePrice()" placeholder comment
-      confirming the gap.
-- [ ] [notifications] `IncrementRetry` (`notifications/notifications.go:46-53`)
-      doesn't validate `by` — a negative `by` silently decrements
-      `RetryCount`, including below zero, with no error. `notifications` has
-      no named owner, so this routes to a fresh `code-agent` session scoped
-      to `notifications/`. `notifications_test.go` has an explicit "no
-      coverage yet for IncrementRetry()" placeholder comment confirming the
-      gap.
-- [ ] [reporting] `AverageMetric` (`reporting/reporting.go:43-53`) divides by
-      `len(rep.Metrics)` with no check for zero metrics, so a report with no
-      metrics set returns `NaN` with a nil error instead of an error.
-      `reporting` has no named owner, so this routes to a fresh `code-agent`
-      session scoped to `reporting/`. `reporting_test.go` only covers
-      reports with metrics already set — the zero-metrics case that
-      triggers the bug isn't tested.
-- [ ] [loyalty] `RedeemPoints` (`loyalty/loyalty.go:47-54`) doesn't validate
-      `points` — it accepts a non-positive value or a value greater than the
-      account's current balance, silently driving `Points` negative with no
-      error (unlike `EarnPoints`, which already validates and is tested for
-      it). `loyalty` has no named owner, so this routes to a fresh
-      `code-agent` session scoped to `loyalty/`. `loyalty_test.go` has an
-      explicit "no coverage yet for RedeemPoints()" placeholder comment
-      confirming the gap.
+- [ ] [billing] Low-severity, non-blocking items surfaced by `security-auditor`
+      during the final verification pass on the `Total`/bounds fix (see
+      Completed entry below): (1) `Ledger.CreateInvoice`
+      (`billing/billing.go:63-67`) still returns the live `*Invoice` pointer,
+      asymmetric with `Get`'s new copy contract — a caller can set
+      `inv.Status = "paid"` directly, bypassing `MarkPaid`. (2) `Total`'s
+      `float64(totalCents)/100` conversion (`billing/billing.go:217`) loses
+      integer-cent precision above ~$90T, below the ~$92.2 quadrillion
+      overflow-detection ceiling the new check guards — a single
+      max-magnitude line item can already approach this. Neither is
+      blocking; worth a future pass.
 
 ## Completed
 
+- [x] [billing] `Total`'s float64 accumulation (`billing/billing.go:104-114`)
+      was subject to standard rounding drift over many line items, and
+      neither `AddLineItem` nor `AddSaleLineItem` enforced any upper bound on
+      `amount`/`qty`/`unitPrice`/`quantity`, so a very large caller-supplied
+      value could push `Total()` toward `+Inf` or lose precision with no
+      error returned. Flagged by `security-auditor` as low/medium severity.
+      Fixed in two passes: first pass added `MaxLineItemAmount`/
+      `MaxLineItemQty` constants, NaN/Inf/upper-bound rejection in
+      `AddLineItem`/`AddSaleLineItem`, and switched `Total` to int64-cents
+      accumulation (`billing/billing.go:62-160`ish). A follow-up
+      `security-auditor` review found this only partially closed the gap —
+      `Ledger.Get` returned the live `*Invoice` with an exported `LineItems`
+      slice, letting callers bypass validation by appending directly, and
+      the cents accumulator had no cap on line-item count (~93 max-magnitude
+      items would silently overflow int64). Second pass fixed both:
+      `Invoice.lineItems` unexported (`billing.go:35`) with a defensive-copy
+      `LineItems()` accessor (`billing.go:43-47`); `Ledger.Get` now returns a
+      value copy with an independently-copied `lineItems` slice
+      (`billing.go:92-100`); `Total`'s accumulation loop now detects int64
+      overflow and errors instead of wrapping (`billing.go:207-216`).
+      Regression tests: `TestGetReturnsCopyNotLiveInvoice`
+      (billing_test.go:444-483) and
+      `TestTotalRejectsIntegerOverflowFromManyLineItems`
+      (billing_test.go:497-518), plus the first-pass precision/bounds tests.
+      Independently verified fully closed by a second `security-auditor`
+      pass (`go test ./... -run 'TestGetReturnsCopyNotLiveInvoice|TestTotalRejectsIntegerOverflowFromManyLineItems'
+      -v` and full suite both pass, 88.9% coverage). Two new low-severity,
+      non-blocking observations surfaced during the final audit were filed
+      as a new Open `[billing]` task rather than fixed in this pass.
 - [x] [billing] Several exported symbols in `billing/billing.go` have no doc
       comments (`LineItem`, `Invoice`, `Ledger`, `CreateInvoice`, `Get`,
       `AddLineItem`, `Total`, `ApplyLateFee`, `MarkPaid`). Added — remaining
@@ -117,6 +106,61 @@ tasks" in `.claude/agents/lead.md` for how it splits these instead.
 - [x] [inventory] `Restock` and `ApplyDiscount` had no input validation —
       fixed, regression tests added.
 - [x] [inventory] Missing doc comments on exported symbols — added.
+- [x] [inventory] `Sell` still didn't validate `qty` against current stock
+      (`inventory/inventory.go:51-58` accepted `qty <= 0` and `qty` greater
+      than stock, driving `item.Qty` negative), despite the earlier Completed
+      entry above claiming this was fixed — `Sell` had been left untouched
+      as out of scope when `Checkout` picked up the guard. Fixed:
+      `inventory/inventory.go:51-68` now rejects `qty <= 0` and
+      `qty > item.Qty` before mutating stock. Regression test `TestSell`
+      added to `inventory_test.go`, replacing the "no coverage yet for
+      Sell()" placeholder; full suite passes
+      (`agent-teams-demo/inventory`, 68.6% coverage).
+- [x] [shipping] `EstimateCost` (`shipping/shipping.go:55-61`) didn't
+      validate `ratePerKg` or the shipment's `Weight`, so a negative rate or
+      shipment weight produced a negative cost with no error. Fixed by a
+      fresh `code-agent` session scoped to `shipping/`:
+      `shipping/shipping.go:53-70` now rejects negative `ratePerKg` and
+      negative `Weight`. Regression tests added at
+      `shipping/shipping_test.go:28-56`, replacing the "no coverage yet for
+      EstimateCost()" placeholder; full suite passes
+      (`agent-teams-demo/shipping`, 84.6% coverage). New log file created:
+      `logs/shipping-code-agent.md`.
+- [x] [catalog] `UpdatePrice` (`catalog/catalog.go:37-43`) didn't validate
+      `price`, accepting a negative price and storing it unchanged with no
+      error. Fixed by a fresh `code-agent` session scoped to `catalog/`:
+      `catalog/catalog.go:40-42` now rejects `price < 0` before mutation.
+      Regression tests added to `catalog_test.go`, replacing the "no
+      coverage yet for UpdatePrice()" placeholder; full suite passes
+      (`agent-teams-demo/catalog`, 90.5% coverage). New log file created:
+      `logs/catalog-code-agent.md`.
+- [x] [notifications] `IncrementRetry` (`notifications/notifications.go:46-53`)
+      didn't validate `by`, so a negative `by` silently decremented
+      `RetryCount` below zero with no error. Fixed by a fresh `code-agent`
+      session scoped to `notifications/`: `notifications/notifications.go:47-50`
+      now rejects negative `by` before mutation. Regression tests added to
+      `notifications_test.go`, replacing the "no coverage yet for
+      IncrementRetry()" placeholder; full suite passes
+      (`agent-teams-demo/notifications`, 85.0% coverage). New log file
+      created: `logs/notifications-code-agent.md`.
+- [x] [reporting] `AverageMetric` (`reporting/reporting.go:43-53`) divided by
+      `len(rep.Metrics)` with no check for zero metrics, returning `NaN`
+      with a nil error instead of an error. Fixed by a fresh `code-agent`
+      session scoped to `reporting/`: `reporting/reporting.go:48-50` now
+      returns an error when `len(rep.Metrics) == 0`. Regression test
+      `TestAverageMetricNoMetrics` added at `reporting_test.go:34-43`; full
+      suite passes (`agent-teams-demo/reporting`, 86.4% coverage). New log
+      file created: `logs/reporting-code-agent.md`.
+- [x] [loyalty] `RedeemPoints` (`loyalty/loyalty.go:47-54`) didn't validate
+      `points`, accepting a non-positive value or a value greater than the
+      account's current balance and silently driving `Points` negative.
+      Fixed by a fresh `code-agent` session scoped to `loyalty/`:
+      `loyalty/loyalty.go:47-61` now rejects `points <= 0` and
+      `points > a.Points` before mutation, mirroring `EarnPoints`'s
+      validation style. Regression tests added to `loyalty_test.go`,
+      replacing the "no coverage yet for RedeemPoints()" placeholder; full
+      suite passes (`agent-teams-demo/loyalty`, 87.5% coverage). New log
+      file created: `logs/loyalty-code-agent.md`.
 
 ## Adding a new task
 

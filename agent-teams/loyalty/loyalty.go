@@ -43,11 +43,19 @@ func (r *Registry) EarnPoints(id string, points int) (int, error) {
 }
 
 // RedeemPoints deducts points from the account's balance and returns the
-// new balance.
+// new balance. It returns an error if points is not positive, or if points
+// exceeds the account's current balance, leaving the balance unchanged in
+// either case.
 func (r *Registry) RedeemPoints(id string, points int) (int, error) {
+	if points <= 0 {
+		return 0, fmt.Errorf("invalid points for %s: must be positive, got %d", id, points)
+	}
 	a, err := r.Get(id)
 	if err != nil {
 		return 0, err
+	}
+	if points > a.Points {
+		return 0, fmt.Errorf("insufficient balance for %s: have %d, requested %d", id, a.Points, points)
 	}
 	a.Points -= points
 	return a.Points, nil

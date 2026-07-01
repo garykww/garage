@@ -31,5 +31,14 @@ func TestAverageMetric(t *testing.T) {
 	}
 }
 
-// No coverage yet for AverageMetric() on a report with zero metrics — left
-// for the agent team to find and fill in.
+func TestAverageMetricNoMetrics(t *testing.T) {
+	r := NewRegistry()
+	r.CreateReport("rep-1", "Q1 Sales")
+	avg, err := r.AverageMetric("rep-1")
+	if err == nil {
+		t.Fatalf("expected error for report with zero metrics, got avg %v", avg)
+	}
+	if avg != 0 {
+		t.Fatalf("expected zero value on error, got %v", avg)
+	}
+}

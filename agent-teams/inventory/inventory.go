@@ -48,10 +48,21 @@ func (inv *Inventory) Restock(id string, qty int) (int, error) {
 	return item.Qty, nil
 }
 
+// Sell sells qty units of the item identified by id, decrementing its stock,
+// and returns the total revenue for the sale (qty * item.Price).
+//
+// qty must be greater than zero and must not exceed the item's current
+// stock; otherwise Sell returns an error and leaves stock unchanged.
 func (inv *Inventory) Sell(id string, qty int) (float64, error) {
+	if qty <= 0 {
+		return 0, fmt.Errorf("invalid quantity: %d", qty)
+	}
 	item, err := inv.Get(id)
 	if err != nil {
 		return 0, err
+	}
+	if qty > item.Qty {
+		return 0, fmt.Errorf("insufficient stock for %s: have %d, want %d", id, item.Qty, qty)
 	}
 	item.Qty -= qty
 	return item.Price * float64(qty), nil
