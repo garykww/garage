@@ -57,6 +57,46 @@ func (inv *Inventory) Sell(id string, qty int) (float64, error) {
 	return item.Price * float64(qty), nil
 }
 
+// CheckoutResult describes a single completed sale line, shaped so that an
+// external caller can hand it to another module's invoicing code (e.g.
+// billing's AddSaleLineItem(invoiceID, itemID, quantity, unitPrice)) without
+// this package importing that module directly.
+type CheckoutResult struct {
+	// ItemID is the sold item's ID (same as Item.ID).
+	ItemID string
+	// Quantity is the number of units sold.
+	Quantity int
+	// UnitPrice is the item's per-unit Price at the time of sale. This is
+	// NOT the total revenue for the line — callers that need a total must
+	// multiply Quantity by UnitPrice themselves.
+	UnitPrice float64
+}
+
+// Checkout sells qty units of the item identified by id, decrementing its
+// stock, and returns a CheckoutResult describing the sale for downstream use
+// (e.g. building an invoice line item in another module).
+//
+// qty must be greater than zero and must not exceed the item's current
+// stock; otherwise Checkout returns an error and leaves stock unchanged.
+func (inv *Inventory) Checkout(id string, qty int) (*CheckoutResult, error) {
+	if qty <= 0 {
+		return nil, fmt.Errorf("invalid quantity: %d", qty)
+	}
+	item, err := inv.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if qty > item.Qty {
+		return nil, fmt.Errorf("insufficient stock for %s: have %d, want %d", id, item.Qty, qty)
+	}
+	item.Qty -= qty
+	return &CheckoutResult{
+		ItemID:    item.ID,
+		Quantity:  qty,
+		UnitPrice: item.Price,
+	}, nil
+}
+
 func (inv *Inventory) ApplyDiscount(id string, percent float64) (float64, error) {
 	item, err := inv.Get(id)
 	if err != nil {
