@@ -133,3 +133,6 @@ working.
   `content`. The harness must tolerate and may surface it, but must not send
   it back in subsequent turns unless the API requires it.
 - vLLM version `0.22.1rc1`.
+- The model is a heavy reasoner: a one-word answer cost 249 completion tokens
+  (thinking included). Budget `max_tokens` generously — small caps will
+  truncate mid-reasoning before any visible output.
