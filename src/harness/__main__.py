@@ -101,7 +101,9 @@ def main() -> int:
                 file=sys.stderr,
             )
 
-    agent = Agent(client, registry, system_prompt=system_prompt, on_event=on_event)
+    agent = Agent(
+        client, registry, system_prompt=system_prompt, on_event=on_event, context_budget=100_000
+    )
     result = agent.run(task)
     transcript.write("result", {"stop_reason": result.stop_reason, "turns": result.turns, "total": total})
     transcript.close()

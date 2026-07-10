@@ -30,6 +30,9 @@ class AgentResult:
     stop_reason: str  # "done" | "max_turns"
 
 
+_ELIDED = "[elided to save context — re-run the tool if you need this again]"
+
+
 class Agent:
     def __init__(
         self,
@@ -38,11 +41,15 @@ class Agent:
         system_prompt: str,
         max_turns: int = 24,
         on_event: OnEvent | None = None,
+        context_budget: int | None = None,
+        keep_recent: int = 8,
     ):
         self.client = client
         self.registry = registry
         self.max_turns = max_turns
         self.on_event = on_event or (lambda kind, data: None)
+        self.context_budget = context_budget
+        self.keep_recent = keep_recent
         self.messages: list[Message] = [{"role": "system", "content": system_prompt}]
 
     def run(self, task: str) -> AgentResult:
@@ -66,4 +73,27 @@ class Agent:
                 self.on_event("tool_result", {"call": call, "result": result})
                 self.messages.append(result)
 
+            self._maybe_compact()
+
         return AgentResult(text="", turns=self.max_turns, stop_reason="max_turns")
+
+    def _maybe_compact(self) -> None:
+        """Elide old tool results when measured usage exceeds the budget.
+
+        ADR 0010: messages are blanked, never removed — the protocol needs
+        one tool result per tool_call_id, so structure must survive.
+        """
+        if not self.context_budget:
+            return
+        usage = self.client.last_usage or {}
+        if usage.get("prompt_tokens", 0) <= self.context_budget:
+            return
+        elidable = self.messages[: -self.keep_recent]
+        elided = 0
+        for m in elidable:
+            content = m.get("content") or ""
+            if m["role"] == "tool" and not content.endswith(_ELIDED):
+                m["content"] = f"{content[:120]}… {_ELIDED}"
+                elided += 1
+        if elided:
+            self.on_event("compact", {"elided": elided, "prompt_tokens": usage.get("prompt_tokens")})

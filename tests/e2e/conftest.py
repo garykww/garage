@@ -38,7 +38,7 @@ def agent_factory(client, tmp_path, request):
     """
     agents: list[Agent] = []
 
-    def make(tools, max_turns: int = 10, ask=None) -> Agent:
+    def make(tools, max_turns: int = 10, ask=None, **agent_kwargs) -> Agent:
         registry = ToolRegistry(tools)
         if ask is not None:
             registry = GatedRegistry(registry, Policy(tmp_path), ask)
@@ -47,6 +47,7 @@ def agent_factory(client, tmp_path, request):
             registry,
             system_prompt=build_system_prompt(tmp_path),
             max_turns=max_turns,
+            **agent_kwargs,
         )
         agents.append(a)
         return a

@@ -15,13 +15,16 @@ def echo(text: str) -> str:
 class FakeClient:
     """Returns scripted assistant messages in order; records requests."""
 
-    def __init__(self, replies):
+    def __init__(self, replies, usages=None):
         self.replies = list(replies)
+        self.usages = list(usages or [])
         self.requests = []
         self.last_usage = None
 
     def chat(self, messages, tools=None, max_tokens=4096):
         self.requests.append([dict(m) for m in messages])
+        if self.usages:
+            self.last_usage = self.usages.pop(0)
         return self.replies.pop(0)
 
 
@@ -33,8 +36,8 @@ def tc(call_id, text):
     }
 
 
-def make_agent(replies, **kwargs):
-    return Agent(FakeClient(replies), ToolRegistry([echo]), system_prompt="sys", **kwargs)
+def make_agent(replies, usages=None, **kwargs):
+    return Agent(FakeClient(replies, usages), ToolRegistry([echo]), system_prompt="sys", **kwargs)
 
 
 def test_immediate_answer():
@@ -78,6 +81,46 @@ def test_max_turns_stops_loop():
     agent = make_agent(replies, max_turns=3)
     result = agent.run("task")
     assert result.stop_reason == "max_turns" and result.turns == 3
+
+
+def test_compaction_elides_old_tool_results_only():
+    long = "x" * 500
+    events = []
+    agent = make_agent(
+        [
+            {"role": "assistant", "content": None, "tool_calls": [tc("c1", long)]},
+            {"role": "assistant", "content": None, "tool_calls": [tc("c2", long)]},
+            {"role": "assistant", "content": "answer"},
+        ],
+        usages=[{"prompt_tokens": 150}, {"prompt_tokens": 150}, {"prompt_tokens": 150}],
+        context_budget=100,
+        keep_recent=2,
+        on_event=lambda k, d: events.append((k, d)),
+    )
+    agent.run("task")
+    tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+    assert "[elided" in tool_msgs[0]["content"]
+    assert tool_msgs[0]["content"].startswith("echo:xxx"), "elided results keep a head"
+    assert "[elided" not in tool_msgs[1]["content"], "recent window stays intact"
+    assert agent.messages[0]["content"] == "sys" and agent.messages[1]["content"] == "task"
+    assert [d for k, d in events if k == "compact"] == [{"elided": 1, "prompt_tokens": 150}]
+    # structure preserved: still one tool result per call id
+    assert [m["tool_call_id"] for m in tool_msgs] == ["c1", "c2"]
+
+
+def test_no_compaction_under_budget():
+    agent = make_agent(
+        [
+            {"role": "assistant", "content": None, "tool_calls": [tc("c1", "a")]},
+            {"role": "assistant", "content": "answer"},
+        ],
+        usages=[{"prompt_tokens": 50}, {"prompt_tokens": 50}],
+        context_budget=100,
+        keep_recent=1,
+    )
+    agent.run("task")
+    tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+    assert tool_msgs[0]["content"] == "echo:a"
 
 
 def test_events_emitted():
