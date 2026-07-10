@@ -43,3 +43,21 @@ cp .env.example .env   # then fill in VLLM_API_KEY
 uv sync
 uv run python -m harness.smoke   # verify connectivity to the LLM server
 ```
+
+## Running a task
+
+```sh
+cd /some/scratch/dir   # the agent works in your cwd — and there is no
+                       # approval gate yet, so don't run it in anything precious
+uv run --project /path/to/harness python -m harness "write fizzbuzz.py and verify it runs"
+```
+
+Tool calls stream to the terminal as they happen; the final answer prints at
+the end. Exit code is nonzero if the agent gave up.
+
+## Tests
+
+```sh
+uv run pytest                            # unit tests, offline, fast
+HARNESS_E2E=1 uv run pytest tests/e2e    # live capability gates vs the real server
+```
