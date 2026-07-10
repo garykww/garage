@@ -9,6 +9,9 @@ __pycache__/
 dist/
 build/
 
+# e2e transcript dumps
+.e2e-transcripts/
+
 # tooling
 .pytest_cache/
 .ruff_cache/

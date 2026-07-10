@@ -151,3 +151,6 @@ AGENTS.md added, streaming pushed back.)
 - The model is a heavy reasoner: a one-word answer cost 249 completion tokens
   (thinking included). Budget `max_tokens` generously — small caps will
   truncate mid-reasoning before any visible output.
+- Parallel tool calls confirmed in practice: the model emits multiple
+  `tool_calls` in one turn when actions are independent (seen in e2e
+  transcripts), so the loop's one-result-per-id handling is exercised live.
