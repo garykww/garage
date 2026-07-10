@@ -84,6 +84,12 @@ def main() -> int:
 
     turn = 0
     total = {"prompt_tokens": 0, "completion_tokens": 0}
+    streamed = False
+
+    def on_text(text: str) -> None:
+        nonlocal streamed
+        streamed = True
+        print(text, end="", flush=True)
 
     def on_event(kind: str, data: dict) -> None:
         nonlocal turn
@@ -102,7 +108,12 @@ def main() -> int:
             )
 
     agent = Agent(
-        client, registry, system_prompt=system_prompt, on_event=on_event, context_budget=100_000
+        client,
+        registry,
+        system_prompt=system_prompt,
+        on_event=on_event,
+        on_text=on_text,
+        context_budget=100_000,
     )
     result = agent.run(task)
     transcript.write("result", {"stop_reason": result.stop_reason, "turns": result.turns, "total": total})
@@ -113,7 +124,8 @@ def main() -> int:
         print(f"stopped: {result.stop_reason} after {result.turns} turns", file=sys.stderr)
         print(f"[transcript: {transcript.path}]", file=sys.stderr)
         return 1
-    print(result.text)
+    if not streamed:  # answer already rendered token-by-token via on_text
+        print(result.text)
     print(
         f"\n[{result.turns} turns, {total['prompt_tokens']} prompt + "
         f"{total['completion_tokens']} completion tokens | transcript: {transcript.path}]",

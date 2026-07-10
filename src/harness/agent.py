@@ -43,6 +43,7 @@ class Agent:
         on_event: OnEvent | None = None,
         context_budget: int | None = None,
         keep_recent: int = 8,
+        on_text: Callable[[str], None] | None = None,
     ):
         self.client = client
         self.registry = registry
@@ -50,13 +51,14 @@ class Agent:
         self.on_event = on_event or (lambda kind, data: None)
         self.context_budget = context_budget
         self.keep_recent = keep_recent
+        self.on_text = on_text
         self.messages: list[Message] = [{"role": "system", "content": system_prompt}]
 
     def run(self, task: str) -> AgentResult:
         self.messages.append({"role": "user", "content": task})
 
         for turn in range(1, self.max_turns + 1):
-            msg = self.client.chat(self.messages, tools=self.registry.schemas())
+            msg = self.client.chat(self.messages, tools=self.registry.schemas(), on_text=self.on_text)
             self.on_event("assistant", msg)
 
             tool_calls = msg.get("tool_calls") or []

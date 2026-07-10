@@ -21,7 +21,7 @@ class FakeClient:
         self.requests = []
         self.last_usage = None
 
-    def chat(self, messages, tools=None, max_tokens=4096):
+    def chat(self, messages, tools=None, max_tokens=4096, on_text=None):
         self.requests.append([dict(m) for m in messages])
         if self.usages:
             self.last_usage = self.usages.pop(0)
