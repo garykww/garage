@@ -93,14 +93,23 @@ Two constraints baked in from day one (see FEATURES.md):
   executes every entry and appends one `tool` result message per call id.
   This is wire-protocol correctness, not a feature.
 
-### 3.4 Context management (later milestone)
+### 3.4 Approval gate (`harness/approval.py`)
+
+A `GatedRegistry` wraps the tool registry with the same interface and
+consults a `Policy` before dispatch (ADR 0009): read-only work is
+auto-allowed (a conservatively classified bash subset, `read_file`, writes
+inside the working directory); everything else asks a human via a pluggable
+callable. Denials flow back to the model as tool results. The agent loop
+knows nothing about any of this.
+
+### 3.5 Context management (later milestone)
 
 131k tokens is a lot but not infinite, and tool output eats it fast. Planned,
 in this order of sophistication: per-result truncation → dropping old tool
 results → summarization. Token counting starts as a crude `len/4` estimate;
 measured against `usage` from the API before anything smarter is built.
 
-### 3.5 CLI (`harness/cli.py`)
+### 3.6 CLI (`harness/cli.py`)
 
 Thin. Reads a task from argv or stdin, streams the agent's progress (each tool
 call and result summary printed as it happens), exits nonzero on failure.
