@@ -8,34 +8,16 @@ Each test grades one capability by an observable effect:
   agent must adapt (ls, then read the real file) rather than repeat or quit.
 """
 
-import json
 import uuid
-from pathlib import Path
 
 import pytest
 
-from harness.agent import Agent
-from harness.prompt import build_system_prompt
-from harness.tools import ToolRegistry
 from harness.tools.bash import bash
-
-TRANSCRIPT_DIR = Path(".e2e-transcripts")
 
 
 @pytest.fixture
-def agent(client, tmp_path, request):
-    a = Agent(
-        client,
-        ToolRegistry([bash]),
-        system_prompt=build_system_prompt(tmp_path),
-        max_turns=10,
-    )
-    yield a
-    # Always dump the transcript: a failed e2e run without one is undebuggable
-    # (ADR 0007 — investigate, don't retry).
-    TRANSCRIPT_DIR.mkdir(exist_ok=True)
-    path = TRANSCRIPT_DIR / f"{request.node.name}.json"
-    path.write_text(json.dumps(a.messages, indent=2))
+def agent(agent_factory):
+    return agent_factory([bash])
 
 
 def test_act_and_verify(agent, tmp_path):
