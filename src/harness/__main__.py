@@ -22,6 +22,9 @@ from .prompt import build_system_prompt
 from .tools import ToolRegistry
 from .tools.bash import bash
 from .tools.files import FILE_TOOLS
+from .transcript import Transcript
+
+SESSIONS_DIR = Path.home() / ".harness" / "sessions"
 
 
 def _preview(text: str, limit: int = 160) -> str:
@@ -64,28 +67,54 @@ def main() -> int:
         print('usage: python -m harness [--yes] "task"  (or task on stdin)', file=sys.stderr)
         return 2
 
+    workdir = Path.cwd()
+    agents_md = workdir / "AGENTS.md"
+    project_notes = agents_md.read_text() if agents_md.is_file() else None
+    system_prompt = build_system_prompt(workdir, project_notes)
+
     registry = GatedRegistry(
         ToolRegistry([bash, *FILE_TOOLS]),
-        Policy(Path.cwd()),
+        Policy(workdir),
         ask=(lambda name, args: True) if auto_yes else _tty_asker,
     )
     client = LLMClient(Config.from_env())
-    agent = Agent(
-        client,
-        registry,
-        system_prompt=build_system_prompt(Path.cwd()),
-        on_event=_on_event,
-    )
+    transcript = Transcript.create(SESSIONS_DIR)
+    transcript.write("system", system_prompt)
+    transcript.write("user", task)
+
+    turn = 0
+    total = {"prompt_tokens": 0, "completion_tokens": 0}
+
+    def on_event(kind: str, data: dict) -> None:
+        nonlocal turn
+        _on_event(kind, data)
+        transcript.write(kind, data)
+        if kind == "assistant":
+            turn += 1
+            usage = client.last_usage or {}
+            for k in total:
+                total[k] += usage.get(k) or 0
+            transcript.write("usage", usage)
+            print(
+                f"  [turn {turn}: {usage.get('prompt_tokens', '?')} prompt, "
+                f"{usage.get('completion_tokens', '?')} completion tokens]",
+                file=sys.stderr,
+            )
+
+    agent = Agent(client, registry, system_prompt=system_prompt, on_event=on_event)
     result = agent.run(task)
-    usage = client.last_usage or {}
+    transcript.write("result", {"stop_reason": result.stop_reason, "turns": result.turns, "total": total})
+    transcript.close()
 
     print()
     if result.stop_reason != "done":
         print(f"stopped: {result.stop_reason} after {result.turns} turns", file=sys.stderr)
+        print(f"[transcript: {transcript.path}]", file=sys.stderr)
         return 1
     print(result.text)
     print(
-        f"\n[{result.turns} turns, {usage.get('prompt_tokens', '?')} prompt tokens in final turn]",
+        f"\n[{result.turns} turns, {total['prompt_tokens']} prompt + "
+        f"{total['completion_tokens']} completion tokens | transcript: {transcript.path}]",
         file=sys.stderr,
     )
     return 0

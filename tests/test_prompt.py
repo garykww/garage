@@ -12,3 +12,12 @@ def test_contains_environment_facts():
 
 def test_relative_workdir_resolved():
     assert str(Path.cwd()) in build_system_prompt(".")
+
+
+def test_project_notes_appended():
+    p = build_system_prompt("/w", project_notes="Always use tabs.")
+    assert "AGENTS.md" in p and "Always use tabs." in p
+
+
+def test_empty_project_notes_omitted():
+    assert "AGENTS.md" not in build_system_prompt("/w", project_notes="  \n")

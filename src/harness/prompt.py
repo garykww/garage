@@ -12,10 +12,10 @@ import platform
 from pathlib import Path
 
 
-def build_system_prompt(workdir: Path | str) -> str:
+def build_system_prompt(workdir: Path | str, project_notes: str | None = None) -> str:
     workdir = Path(workdir).resolve()
     today = datetime.date.today().isoformat()
-    return f"""\
+    prompt = f"""\
 You are a coding agent. You complete tasks by calling tools, observing their \
 results, and iterating until the task is done. Then you answer.
 
@@ -35,3 +35,6 @@ file you wrote, re-run a command you fixed).
 - When the task is complete, reply with a short final answer in plain text \
 and no tool calls. Include any value the user asked for verbatim.
 """
+    if project_notes and project_notes.strip():
+        prompt += f"\n# Project notes (from AGENTS.md)\n{project_notes.strip()}\n"
+    return prompt
