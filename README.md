@@ -47,13 +47,17 @@ uv run python -m harness.smoke   # verify connectivity to the LLM server
 ## Running a task
 
 ```sh
-cd /some/scratch/dir   # the agent works in your cwd — and there is no
-                       # approval gate yet, so don't run it in anything precious
+cd /some/scratch/dir   # the agent works in your cwd
 uv run --project /path/to/harness python -m harness "write fizzbuzz.py and verify it runs"
 ```
 
 Tool calls stream to the terminal as they happen; the final answer prints at
 the end. Exit code is nonzero if the agent gave up.
+
+Read-only commands and writes inside the working directory run unprompted;
+anything else asks `allow bash(command=...)? [y/N]` on the terminal
+(ADR 0009). Pass `--yes` to auto-approve everything, e.g. in scripts —
+without a tty, unapproved calls are denied rather than hanging.
 
 ## Tests
 

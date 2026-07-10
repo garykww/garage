@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from harness.agent import Agent
+from harness.approval import GatedRegistry, Policy
 from harness.config import Config
 from harness.llm import LLMClient
 from harness.prompt import build_system_prompt
@@ -37,10 +38,13 @@ def agent_factory(client, tmp_path, request):
     """
     agents: list[Agent] = []
 
-    def make(tools, max_turns: int = 10) -> Agent:
+    def make(tools, max_turns: int = 10, ask=None) -> Agent:
+        registry = ToolRegistry(tools)
+        if ask is not None:
+            registry = GatedRegistry(registry, Policy(tmp_path), ask)
         a = Agent(
             client,
-            ToolRegistry(tools),
+            registry,
             system_prompt=build_system_prompt(tmp_path),
             max_turns=max_turns,
         )

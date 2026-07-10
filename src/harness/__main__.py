@@ -1,11 +1,11 @@
-"""Minimal CLI: `python -m harness "task"` (or task on stdin).
+"""Minimal CLI: `python -m harness [--yes] "task"` (or task on stdin).
 
 Prints each tool call and a result preview as the agent works, then the
 final answer. Exits nonzero if the agent hit max_turns.
 
-WARNING: there is no approval gate yet (milestone 5) — the agent runs
-shell commands unattended in your current directory. Run real tasks in a
-scratch directory.
+Mutating tool calls prompt y/N on the terminal (ADR 0009); --yes
+auto-approves everything. Without a tty and without --yes, unapproved
+calls are denied rather than hanging.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from .agent import Agent
+from .approval import GatedRegistry, Policy
 from .config import Config
 from .llm import LLMClient
 from .prompt import build_system_prompt
@@ -42,16 +43,36 @@ def _on_event(kind: str, data: dict) -> None:
         print(f"  ← {_preview(data['result']['content'])}")
 
 
+def _tty_asker(name: str, args: dict) -> bool:
+    arg_str = ", ".join(f"{k}={_preview(str(v), 200)!r}" for k, v in args.items())
+    try:
+        with open("/dev/tty", "r+") as tty:
+            tty.write(f"allow {name}({arg_str})? [y/N] ")
+            tty.flush()
+            return tty.readline().strip().lower() in ("y", "yes")
+    except OSError:
+        print(f"  (no tty — denying {name})", file=sys.stderr)
+        return False
+
+
 def main() -> int:
-    task = " ".join(sys.argv[1:]).strip() or sys.stdin.read().strip()
+    argv = sys.argv[1:]
+    auto_yes = "--yes" in argv or "-y" in argv
+    argv = [a for a in argv if a not in ("--yes", "-y")]
+    task = " ".join(argv).strip() or sys.stdin.read().strip()
     if not task:
-        print("usage: python -m harness \"task\"  (or task on stdin)", file=sys.stderr)
+        print('usage: python -m harness [--yes] "task"  (or task on stdin)', file=sys.stderr)
         return 2
 
+    registry = GatedRegistry(
+        ToolRegistry([bash, *FILE_TOOLS]),
+        Policy(Path.cwd()),
+        ask=(lambda name, args: True) if auto_yes else _tty_asker,
+    )
     client = LLMClient(Config.from_env())
     agent = Agent(
         client,
-        ToolRegistry([bash, *FILE_TOOLS]),
+        registry,
         system_prompt=build_system_prompt(Path.cwd()),
         on_event=_on_event,
     )
