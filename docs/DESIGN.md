@@ -83,6 +83,15 @@ execute them, append results, repeat → else return the text. Explicit limits:
 max turns, max consecutive tool errors. The loop owns the message list — it is
 the single source of truth for conversation state.
 
+Two constraints baked in from day one (see FEATURES.md):
+
+- **System prompt with environment context.** A 35B local model needs role,
+  cwd, OS, date, and tool-use guidance injected, or it hallucinates paths and
+  answers in prose instead of acting. Built by `harness/prompt.py`.
+- **Parallel tool calls.** The API returns `tool_calls` as an array; the loop
+  executes every entry and appends one `tool` result message per call id.
+  This is wire-protocol correctness, not a feature.
+
 ### 3.4 Context management (later milestone)
 
 131k tokens is a lot but not infinite, and tool output eats it fast. Planned,
@@ -117,11 +126,16 @@ working.
 | 0 | Repo, design, decisions | this document exists |
 | 1 | LLM client + smoke test | `python -m harness.smoke` round-trips the server |
 | 2 | Tool registry + bash tool | model can run a command and see output |
-| 3 | Agent loop | multi-turn task completes end-to-end |
+| 3 | Agent loop + system prompt | multi-turn task completes end-to-end; parallel tool calls handled; transient LLM errors retried |
 | 4 | File tools (read/write/edit) | agent can make a code change |
-| 5 | CLI + transcript logging | usable from the terminal, sessions replayable |
-| 6 | Context management | long sessions stay under budget |
-| 7 | Streaming output | tokens render as they arrive |
+| 5 | Approval gate | non-allowlisted commands require y/n before running |
+| 6 | CLI, transcripts, AGENTS.md | usable from the terminal, sessions replayable, project memory loaded, per-turn token telemetry |
+| 7 | Context management | long sessions stay under budget |
+| 8 | Streaming output | tokens render as they arrive |
+
+(Roadmap revised 2026-07-10 after the FEATURES.md comparison with Claude Code
+and Codex: system prompt and parallel calls folded into M3, approval gate and
+AGENTS.md added, streaming pushed back.)
 
 ## 6. Backend facts (measured 2026-07-10)
 
