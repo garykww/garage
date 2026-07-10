@@ -147,6 +147,12 @@ working.
 and Codex: system prompt and parallel calls folded into M3, approval gate and
 AGENTS.md added, streaming pushed back.)
 
+**All milestones complete as of 2026-07-10.** Every milestone is gated by an
+e2e test in `tests/e2e/` that still runs against the live server. Candidate
+next steps, in FEATURES.md priority order: dedicated search tools (if
+transcripts show wasteful grepping), remembered approvals, summarization-based
+compaction (ADR 0010's trigger), session resume from transcripts.
+
 ## 6. Backend facts (measured 2026-07-10)
 
 - Endpoint `http://nv-spark-01:8000/v1`, bearer-token auth.
