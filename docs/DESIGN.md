@@ -66,8 +66,9 @@ A tool is: a name, a description, a JSON-schema for parameters, and a Python
 function. A registry maps names to tools and produces the `tools` array for
 the API. Design intent:
 
-- Defining a tool should be one decorator on a plain function; the schema is
-  derived from the signature where possible.
+- Defining a tool is one decorator on a plain function, with an explicit
+  JSON-schema `parameters` dict (ADR 0005 — descriptions steer the model and
+  can't be derived; the registry validates schema/signature agreement).
 - Tool *output* is always a string (what the model sees). Truncation policy
   lives here, not in each tool.
 - Errors from tools are returned to the model as tool results, never raised
