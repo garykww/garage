@@ -45,7 +45,84 @@ func TestPartialRefund(t *testing.T) {
 	}
 }
 
-// No coverage yet for Refund's validation — the planted gap in BACKLOG.md.
-// Refund currently accepts a non-positive amount and a total refund greater
-// than the captured amount, unlike Capture, which validates and is tested
-// for it.
+func TestRefundRejectsNonPositiveAmount(t *testing.T) {
+	p := NewProcessor()
+	id, err := p.Capture("order-1", 100)
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if err := p.Refund(id, 0); err == nil {
+		t.Errorf("Refund with zero amount: want error, got nil")
+	}
+	if err := p.Refund(id, -10); err == nil {
+		t.Errorf("Refund with negative amount: want error, got nil")
+	}
+	ch, err := p.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if ch.Refunded != 0 || ch.Status != "captured" {
+		t.Errorf("after rejected refunds: %+v, want Refunded 0 and Status captured", ch)
+	}
+}
+
+func TestRefundRejectsOverRefund(t *testing.T) {
+	p := NewProcessor()
+	id, err := p.Capture("order-1", 100)
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if err := p.Refund(id, 120); err == nil {
+		t.Errorf("Refund exceeding captured amount: want error, got nil")
+	}
+	if err := p.Refund(id, 60); err != nil {
+		t.Fatalf("first partial Refund: %v", err)
+	}
+	// Cumulative: 60 already refunded, another 50 would exceed 100.
+	if err := p.Refund(id, 50); err == nil {
+		t.Errorf("cumulative refund exceeding captured amount: want error, got nil")
+	}
+	ch, err := p.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if ch.Refunded != 60 || ch.Status != "captured" {
+		t.Errorf("after over-refund attempts: %+v, want Refunded 60 and Status captured", ch)
+	}
+}
+
+func TestRefundRejectsUnknownCharge(t *testing.T) {
+	p := NewProcessor()
+	if err := p.Refund("ch-missing", 10); err == nil {
+		t.Errorf("Refund on unknown charge: want error, got nil")
+	}
+}
+
+func TestGetRejectsUnknownCharge(t *testing.T) {
+	p := NewProcessor()
+	ch, err := p.Get("ch-missing")
+	if err == nil {
+		t.Errorf("Get on unknown charge: want error, got nil")
+	}
+	if ch != (Charge{}) {
+		t.Errorf("Get on unknown charge = %+v, want zero Charge", ch)
+	}
+}
+
+func TestRefundFullFlipsStatus(t *testing.T) {
+	p := NewProcessor()
+	id, err := p.Capture("order-1", 100)
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if err := p.Refund(id, 100); err != nil {
+		t.Fatalf("full Refund: %v", err)
+	}
+	ch, err := p.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if ch.Refunded != 100 || ch.Status != "refunded" {
+		t.Errorf("after full refund: %+v, want Refunded 100 and Status refunded", ch)
+	}
+}

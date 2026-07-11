@@ -41,13 +41,20 @@ func (p *Processor) Capture(orderID string, amount float64) (string, error) {
 	return id, nil
 }
 
-// Refund records a refund against an existing charge. Once the refunded
-// total reaches the captured amount, the charge's status flips to
-// "refunded".
+// Refund records a refund against an existing charge. The amount must be
+// positive, and the cumulative refunded total must not exceed the captured
+// amount. Once the refunded total reaches the captured amount, the charge's
+// status flips to "refunded".
 func (p *Processor) Refund(chargeID string, amount float64) error {
 	ch, ok := p.charges[chargeID]
 	if !ok {
 		return fmt.Errorf("payment: no charge %q", chargeID)
+	}
+	if amount <= 0 {
+		return fmt.Errorf("payment: refund amount must be positive, got %v", amount)
+	}
+	if ch.Refunded+amount > ch.Amount {
+		return fmt.Errorf("payment: refund of %v exceeds refundable balance %v", amount, ch.Amount-ch.Refunded)
 	}
 	ch.Refunded += amount
 	if ch.Refunded >= ch.Amount {

@@ -6,6 +6,7 @@ package emailer
 
 import (
 	"fmt"
+	"html/template"
 	"strings"
 )
 
@@ -46,14 +47,35 @@ func (q *Queue) Pending() []Message {
 	return out
 }
 
+// receiptTemplate renders an order receipt. Because it is parsed with
+// html/template, every interpolated value (customer name, receipt lines)
+// is contextually auto-escaped, so untrusted input cannot inject markup.
+var receiptTemplate = template.Must(template.New("receipt").Parse(
+	"<h1>Receipt for {{.Customer}}</h1>\n<ul>\n" +
+		"{{range .Lines}}  <li>{{.}}</li>\n{{end}}" +
+		"</ul>\n<p>Total: {{.Total}}</p>\n"))
+
 // RenderReceiptHTML builds the HTML body for an order receipt: the
 // customer's name, one line per purchased item, and the charged total.
+//
+// The customer name and receipt lines are HTML-escaped via html/template,
+// so a value containing markup such as "<script>" is rendered as inert
+// text rather than executable HTML (guards against stored XSS).
 func RenderReceiptHTML(customer string, lines []string, total float64) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("<h1>Receipt for %s</h1>\n<ul>\n", customer))
-	for _, line := range lines {
-		b.WriteString(fmt.Sprintf("  <li>%s</li>\n", line))
+	data := struct {
+		Customer string
+		Lines    []string
+		Total    string
+	}{
+		Customer: customer,
+		Lines:    lines,
+		Total:    fmt.Sprintf("$%.2f", total),
 	}
-	b.WriteString(fmt.Sprintf("</ul>\n<p>Total: $%.2f</p>\n", total))
+	if err := receiptTemplate.Execute(&b, data); err != nil {
+		// The template is a compile-time constant and the data types are
+		// fixed, so Execute cannot fail in practice; surface it defensively.
+		return fmt.Sprintf("emailer: failed to render receipt: %v", err)
+	}
 	return b.String()
 }

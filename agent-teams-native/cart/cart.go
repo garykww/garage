@@ -27,10 +27,18 @@ func New(customer string) (*Cart, error) {
 	return &Cart{Customer: customer}, nil
 }
 
-// AddItem appends a line to the cart.
+// AddItem appends a line to the cart. It rejects an empty productID, a
+// non-positive qty, and a negative unitPrice so that an invalid line can
+// never be stored and silently skew Total.
 func (c *Cart) AddItem(productID string, qty int, unitPrice float64) error {
 	if productID == "" {
 		return fmt.Errorf("cart: productID must not be empty")
+	}
+	if qty <= 0 {
+		return fmt.Errorf("cart: qty must be positive, got %d", qty)
+	}
+	if unitPrice < 0 {
+		return fmt.Errorf("cart: unitPrice must not be negative, got %v", unitPrice)
 	}
 	c.Items = append(c.Items, Item{ProductID: productID, Qty: qty, UnitPrice: unitPrice})
 	return nil
