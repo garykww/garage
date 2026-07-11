@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whoop-raw"
+version = "0.1.0"
+description = "Terminal app that connects to a WHOOP band over BLE and streams raw data"
+requires-python = ">=3.10"
+dependencies = [
+    "bleak>=0.22",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+whoop-raw = "whoop_raw.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["whoop_raw*"]
