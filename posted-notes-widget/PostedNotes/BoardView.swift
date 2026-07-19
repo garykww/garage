@@ -76,7 +76,8 @@ struct BoardView: View {
             .help("New note (or double-click the board)")
         }
         .padding(.horizontal, 14)
-        .padding(.top, 10)
+        .padding(.vertical, 10)
+        .background(WindowDragHandle())
     }
 
     private func dragGesture(_ note: Binding<Note>) -> some Gesture {
@@ -132,6 +133,19 @@ struct BoardView: View {
         NotesStore.save(notes)
         WidgetCenter.shared.reloadAllTimelines()
     }
+}
+
+/// Mouse-down on the (otherwise inert) header area hands the event to
+/// AppKit's window-drag machinery, so the header moves the whole board.
+struct WindowDragHandle: NSViewRepresentable {
+    final class HandleView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+    }
+
+    func makeNSView(context: Context) -> NSView { HandleView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 struct StickyCard: View {

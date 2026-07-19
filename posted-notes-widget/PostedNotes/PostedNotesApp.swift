@@ -27,7 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // lives on the desktop instead of floating over other apps.
         window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        window.isMovableByWindowBackground = true
+        // Window moves only via the header drag handle — background dragging
+        // would hijack the note-card drag gestures.
+        window.isMovableByWindowBackground = false
         window.contentView = NSHostingView(rootView: BoardView())
         if !window.setFrameUsingName("board") {
             window.center()
