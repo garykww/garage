@@ -27,9 +27,12 @@ struct BoardView: View {
             header
 
             ForEach($notes) { $note in
-                StickyCard(note: $note, focus: $focusedNote) {
-                    delete($note.wrappedValue)
-                }
+                StickyCard(
+                    note: $note,
+                    focus: $focusedNote,
+                    onDelete: { delete($note.wrappedValue) },
+                    onRecolor: { persistAndReloadWidget() }
+                )
                 .position(x: note.x ?? 100, y: note.y ?? 100)
                 .gesture(dragGesture($note))
             }
@@ -152,6 +155,7 @@ struct StickyCard: View {
     @Binding var note: Note
     var focus: FocusState<UUID?>.Binding
     let onDelete: () -> Void
+    let onRecolor: () -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -185,7 +189,39 @@ struct StickyCard: View {
                 .offset(x: 6, y: -6)
             }
         }
+        .overlay(alignment: .bottom) {
+            if hovering {
+                palette
+                    .padding(.bottom, 5)
+            }
+        }
         .onHover { hovering = $0 }
+    }
+
+    /// Five swatches to recolor the note; the current color gets a ring.
+    private var palette: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<StickyStyle.colors.count, id: \.self) { idx in
+                Button {
+                    note.colorIndex = idx
+                    onRecolor()
+                } label: {
+                    Circle()
+                        .fill(StickyStyle.colors[idx])
+                        .frame(width: 13, height: 13)
+                        .overlay(
+                            Circle().strokeBorder(
+                                .black.opacity(idx == abs(note.colorIndex) % StickyStyle.colors.count ? 0.55 : 0.18),
+                                lineWidth: idx == abs(note.colorIndex) % StickyStyle.colors.count ? 1.5 : 1
+                            )
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(.white.opacity(0.65), in: Capsule())
     }
 }
 
