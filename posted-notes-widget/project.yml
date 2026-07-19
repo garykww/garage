@@ -1,0 +1,65 @@
+name: PostedNotes
+options:
+  bundleIdPrefix: dev.garage
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  PostedNotes:
+    type: application
+    platform: macOS
+    sources:
+      - PostedNotes
+      - Shared
+    entitlements:
+      path: PostedNotes/PostedNotes.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.files.user-selected.read-only: true
+        com.apple.security.application-groups:
+          - group.dev.garage.posted-notes
+    info:
+      path: PostedNotes/Info.plist
+      properties:
+        CFBundleDisplayName: Posted Notes
+        LSApplicationCategoryType: public.app-category.productivity
+        NSHumanReadableCopyright: ""
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.garage.posted-notes
+        ENABLE_HARDENED_RUNTIME: true
+    dependencies:
+      - target: PostedNotesWidget
+        embed: true
+
+  PostedNotesWidget:
+    type: extensionkit-extension
+    platform: macOS
+    sources:
+      - PostedNotesWidget
+      - Shared
+    entitlements:
+      path: PostedNotesWidget/PostedNotesWidget.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - group.dev.garage.posted-notes
+    info:
+      path: PostedNotesWidget/Info.plist
+      properties:
+        CFBundleDisplayName: Posted Notes
+        EXAppExtensionAttributes:
+          EXExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.garage.posted-notes.widget
+        ENABLE_HARDENED_RUNTIME: true
+        SKIP_INSTALL: true
