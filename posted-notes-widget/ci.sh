@@ -23,3 +23,9 @@ xcodebuild -project PostedNotes.xcodeproj \
   -derivedDataPath build \
   CODE_SIGNING_ALLOWED=NO \
   build
+
+xcodebuild test -project PostedNotes.xcodeproj \
+  -scheme PostedNotes \
+  -destination 'platform=macOS' \
+  -derivedDataPath build \
+  CODE_SIGNING_ALLOWED=NO

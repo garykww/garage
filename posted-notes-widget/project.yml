@@ -44,6 +44,9 @@ targets:
     dependencies:
       - target: PostedNotesWidget
         embed: true
+    scheme:
+      testTargets:
+        - PostedNotesTests
 
   PostedNotesWidget:
     type: extensionkit-extension
@@ -68,3 +71,16 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.garage.posted-notes.widget
         ENABLE_HARDENED_RUNTIME: true
         SKIP_INSTALL: true
+
+  # Standalone test bundle (no host app): compiles Shared directly so the
+  # tests never touch the real app-group container.
+  PostedNotesTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - PostedNotesTests
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.garage.posted-notes.tests
+        GENERATE_INFOPLIST_FILE: true

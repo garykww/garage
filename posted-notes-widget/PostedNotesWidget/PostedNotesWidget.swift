@@ -11,12 +11,8 @@ struct NotesProvider: TimelineProvider {
         NotesEntry(date: .now, notes: NotesEntry.sample)
     }
 
-    /// Notes being typed on the board are saved keystroke-by-keystroke;
-    /// hide ones that are still empty.
     private func postedNotes() -> [Note] {
-        NotesStore.load().filter {
-            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
+        NotesStore.posted(NotesStore.load())
     }
 
     func getSnapshot(in context: Context, completion: @escaping (NotesEntry) -> Void) {

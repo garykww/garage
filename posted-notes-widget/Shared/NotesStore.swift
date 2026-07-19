@@ -37,18 +37,27 @@ enum NotesStore {
         return base.appendingPathComponent("notes.json")
     }
 
-    static func load() -> [Note] {
-        guard let data = try? Data(contentsOf: fileURL) else { return [] }
+    static func load(from url: URL = fileURL) -> [Note] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return (try? decoder.decode([Note].self, from: data)) ?? []
     }
 
-    static func save(_ notes: [Note]) {
+    static func save(_ notes: [Note], to url: URL = fileURL) {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(notes) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        try? data.write(to: url, options: .atomic)
+    }
+
+    /// Notes worth showing outside the board: ones with actual text.
+    /// (The board saves keystroke-by-keystroke, so freshly created notes
+    /// can exist on disk with empty text.)
+    static func posted(_ notes: [Note]) -> [Note] {
+        notes.filter {
+            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
     }
 }
