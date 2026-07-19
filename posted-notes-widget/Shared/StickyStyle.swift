@@ -10,7 +10,22 @@ enum StickyStyle {
         Color(red: 1.00, green: 0.84, blue: 0.63), // orange
     ]
 
+    /// Handwriting "ink" on the paper.
+    static let ink = Color.black.opacity(0.78)
+    static let fadedInk = Color.black.opacity(0.42)
+
     static func color(for note: Note) -> Color {
         colors[abs(note.colorIndex) % colors.count]
+    }
+
+    static func handFont(size: CGFloat) -> Font {
+        .custom("Noteworthy-Light", size: size)
+    }
+
+    /// Stable per-note tilt in −3°…+3°. Derived from the UUID string, not
+    /// `hashValue`, so the same note tilts the same way across launches.
+    static func rotationDegrees(for note: Note) -> Double {
+        let seed = note.id.uuidString.utf8.reduce(0) { ($0 &* 31 &+ Int($1)) & 0xFFFF }
+        return Double(seed % 61) / 10.0 - 3.0
     }
 }

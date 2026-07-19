@@ -84,18 +84,26 @@ struct StickyNoteCard: View {
     let compact: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(note.text)
-                .font(compact ? .footnote : .callout)
-                .lineLimit(compact ? 4 : 2)
-                .foregroundStyle(.black.opacity(0.85))
-            Text(note.postedAt, format: .relative(presentation: .named))
-                .font(.caption2)
-                .foregroundStyle(.black.opacity(0.45))
+        PostIt(
+            color: StickyStyle.color(for: note),
+            // Half the board's tilt: full ±3° would clip in the tight
+            // widget layout.
+            rotation: StickyStyle.rotationDegrees(for: note) / 2,
+            curl: 10
+        ) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(note.text)
+                    .font(StickyStyle.handFont(size: compact ? 13 : 14))
+                    .lineLimit(compact ? 4 : 2)
+                    .foregroundStyle(StickyStyle.ink)
+                Text(note.postedAt, format: .relative(presentation: .named))
+                    .font(StickyStyle.handFont(size: 9))
+                    .foregroundStyle(StickyStyle.fadedInk)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, maxHeight: compact ? .infinity : nil, alignment: .topLeading)
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, maxHeight: compact ? .infinity : nil, alignment: .topLeading)
-        .background(StickyStyle.color(for: note), in: RoundedRectangle(cornerRadius: 7))
+        .padding(.horizontal, 3)
     }
 }
 

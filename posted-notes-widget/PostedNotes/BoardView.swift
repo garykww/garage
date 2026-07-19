@@ -123,8 +123,8 @@ struct BoardView: View {
     private func placeLegacyNotes() {
         var placed = 0
         for idx in notes.indices where notes[idx].x == nil || notes[idx].y == nil {
-            notes[idx].x = 100 + Double(placed % 3) * 155
-            notes[idx].y = 90 + Double(placed / 3) * 120 + Double(placed % 3) * 14
+            notes[idx].x = 95 + Double(placed % 3) * 145
+            notes[idx].y = 120 + Double(placed / 3) * 165 + Double(placed % 3) * 12
             placed += 1
         }
     }
@@ -155,21 +155,25 @@ struct StickyCard: View {
     @State private var hovering = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            TextField("New note…", text: $note.text, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.callout)
-                .foregroundStyle(.black.opacity(0.85))
-                .lineLimit(1...10)
-                .focused(focus, equals: note.id)
-            Text(note.postedAt, format: .relative(presentation: .named))
-                .font(.caption2)
-                .foregroundStyle(.black.opacity(0.4))
+        PostIt(
+            color: StickyStyle.color(for: note),
+            rotation: StickyStyle.rotationDegrees(for: note)
+        ) {
+            VStack(alignment: .leading, spacing: 4) {
+                TextField("New note…", text: $note.text, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(StickyStyle.handFont(size: 15))
+                    .foregroundStyle(StickyStyle.ink)
+                    .lineLimit(1...6)
+                    .focused(focus, equals: note.id)
+                Spacer(minLength: 0)
+                Text(note.postedAt, format: .relative(presentation: .named))
+                    .font(StickyStyle.handFont(size: 10))
+                    .foregroundStyle(StickyStyle.fadedInk)
+            }
+            .padding(12)
+            .frame(width: 150, height: 150, alignment: .topLeading)
         }
-        .padding(10)
-        .frame(width: 150, alignment: .topLeading)
-        .background(StickyStyle.color(for: note), in: RoundedRectangle(cornerRadius: 8))
-        .shadow(color: .black.opacity(0.22), radius: 3, y: 2)
         .overlay(alignment: .topTrailing) {
             if hovering {
                 Button(action: onDelete) {
