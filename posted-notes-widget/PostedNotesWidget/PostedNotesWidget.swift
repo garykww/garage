@@ -11,13 +11,21 @@ struct NotesProvider: TimelineProvider {
         NotesEntry(date: .now, notes: NotesEntry.sample)
     }
 
+    /// Notes being typed on the board are saved keystroke-by-keystroke;
+    /// hide ones that are still empty.
+    private func postedNotes() -> [Note] {
+        NotesStore.load().filter {
+            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
     func getSnapshot(in context: Context, completion: @escaping (NotesEntry) -> Void) {
-        let notes = NotesStore.load()
+        let notes = postedNotes()
         completion(NotesEntry(date: .now, notes: notes.isEmpty ? NotesEntry.sample : notes))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<NotesEntry>) -> Void) {
-        let entry = NotesEntry(date: .now, notes: NotesStore.load())
+        let entry = NotesEntry(date: .now, notes: postedNotes())
         // The app reloads timelines on every post; hourly refresh keeps
         // relative timestamps from going stale in between.
         let next = Calendar.current.date(byAdding: .hour, value: 1, to: .now)!

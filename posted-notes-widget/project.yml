@@ -35,6 +35,7 @@ targets:
       properties:
         CFBundleDisplayName: Posted Notes
         LSApplicationCategoryType: public.app-category.productivity
+        LSUIElement: true
         NSHumanReadableCopyright: ""
     settings:
       base:

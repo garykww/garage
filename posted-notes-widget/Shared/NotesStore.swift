@@ -5,12 +5,18 @@ struct Note: Identifiable, Codable, Equatable {
     var text: String
     var postedAt: Date
     var colorIndex: Int
+    /// Free-board position (board-local coordinates). nil until placed.
+    var x: Double?
+    var y: Double?
 
-    init(id: UUID = UUID(), text: String, postedAt: Date = .now, colorIndex: Int) {
+    init(id: UUID = UUID(), text: String, postedAt: Date = .now, colorIndex: Int,
+         x: Double? = nil, y: Double? = nil) {
         self.id = id
         self.text = text
         self.postedAt = postedAt
         self.colorIndex = colorIndex
+        self.x = x
+        self.y = y
     }
 }
 
