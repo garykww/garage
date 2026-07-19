@@ -6,7 +6,7 @@
 	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.dev.garage.posted-notes</string>
+		<string>6PU94W2HBX.dev.garage.posted-notes</string>
 	</array>
 </dict>
 </plist>

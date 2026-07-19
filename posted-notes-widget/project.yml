@@ -5,12 +5,16 @@ options:
     macOS: "14.0"
   createIntermediateGroups: true
 
+# App-group data sharing requires a team-prefixed group ID and a real
+# development certificate. Change TEAM_ID (and the group IDs below +
+# NotesStore.appGroupID) to your own team to build on another machine;
+# CI builds with CODE_SIGNING_ALLOWED=NO so it never needs the cert.
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_IDENTITY: "Apple Development"
     CODE_SIGN_STYLE: Automatic
-    DEVELOPMENT_TEAM: ""
+    DEVELOPMENT_TEAM: 6PU94W2HBX
 
 targets:
   PostedNotes:
@@ -25,7 +29,7 @@ targets:
         com.apple.security.app-sandbox: true
         com.apple.security.files.user-selected.read-only: true
         com.apple.security.application-groups:
-          - group.dev.garage.posted-notes
+          - 6PU94W2HBX.dev.garage.posted-notes
     info:
       path: PostedNotes/Info.plist
       properties:
@@ -51,7 +55,7 @@ targets:
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.application-groups:
-          - group.dev.garage.posted-notes
+          - 6PU94W2HBX.dev.garage.posted-notes
     info:
       path: PostedNotesWidget/Info.plist
       properties:

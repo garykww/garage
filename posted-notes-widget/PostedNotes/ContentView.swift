@@ -37,7 +37,10 @@ struct ContentView: View {
                 }
             }
         }
-        .onAppear { draftFocused = true }
+        .onAppear {
+            draftFocused = true
+            WidgetCenter.shared.reloadAllTimelines()
+        }
     }
 
     private func post() {

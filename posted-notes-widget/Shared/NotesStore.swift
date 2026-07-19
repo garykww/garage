@@ -18,7 +18,9 @@ struct Note: Identifiable, Codable, Equatable {
 /// and the widget extension see the same data. Falls back to Application
 /// Support when the group container is unavailable (e.g. unsigned CI builds).
 enum NotesStore {
-    static let appGroupID = "group.dev.garage.posted-notes"
+    // Must be team-prefixed (TEAMID.name) and match the entitlements in
+    // project.yml — non-prefixed groups are denied to sandboxed extensions.
+    static let appGroupID = "6PU94W2HBX.dev.garage.posted-notes"
 
     static var fileURL: URL {
         let base = FileManager.default
