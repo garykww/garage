@@ -7,6 +7,72 @@ vLLM launch scripts for NVIDIA DGX Spark (GB10, `sm_121`), with OpenAI-compatibl
 | `run-gemma4-26b-a4b-spark.sh` | `nvidia/Gemma-4-26B-A4B-NVFP4` | Docker-based, HF-hosted weights, agentic tool calling |
 | `serve-qwen36-35b-a3b-dflash.sh` | `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | Docker-based, DFlash speculative decoding |
 | `serve-diffusiongemma-26b-a4b.sh` | `RedHatAI/diffusiongemma-26B-A4B-it-NVFP4` | Docker-based, diffusion decoding (V2 model runner) |
+| `serve-qwen38-27b-mtp.sh` | `unsloth/Qwen3.8-27B-NVFP4` | Docker-based, dense hybrid-attention VLM, built-in MTP speculative decoding |
+
+---
+
+## Qwen3.8-27B (MTP)
+
+**unsloth/Qwen3.8-27B-NVFP4** — a dense, hybrid-attention (linear attention on 48 of 64 layers), natively multimodal (vision-capable) model with a built-in Multi-Token Prediction (MTP) draft head baked into the checkpoint, 262,144-token native context, and NVFP4 weights that fit a single Blackwell GPU at ~24.6 GiB.
+
+The launcher (`serve-qwen38-27b-mtp.sh`) is self-contained and handles:
+
+1. **Pre-staging** the NVFP4 weights into a host-mounted HF cache (download once, reuse across restarts) — no separate draft model to stage, since MTP's draft head ships inside the checkpoint (unlike the Qwen3.6 DFlash recipe above)
+2. **Launching vLLM** in a Docker container with all recommended flags pre-set, tuned for Spark's unified-memory profile
+3. **Waiting for readiness**, streaming container logs while the safetensor load completes
+4. **Pre-warming the JIT** so the first real request doesn't eat cold-start compilation
+
+### Image
+
+Default image: `ghcr.io/spark-arena/dgx-vllm-eugr-nightly` (same patched DGX Spark build used by the other scripts in this folder; its entrypoint is not `vllm serve`, so the launcher prepends it).
+
+### Requirements
+
+- NVIDIA DGX Spark (GB10 / `sm_121`) with the NVIDIA container runtime
+- Docker with `--gpus all` support
+- `HF_TOKEN` set (gated models)
+- `curl` and `jq` (readiness check and warm-up)
+
+### Quick start
+
+```bash
+export HF_TOKEN=hf_xxx
+bash serve-qwen38-27b-mtp.sh
+```
+
+```
+Ready.    http://localhost:8000/v1
+Metrics:  http://localhost:8000/metrics
+Logs:     docker logs -f vllm-qwen38
+```
+
+Examples:
+
+```bash
+BIND_ADDR=127.0.0.1 API_KEY=sk-mykey bash serve-qwen38-27b-mtp.sh
+SKIP_PRESTAGE=1 bash serve-qwen38-27b-mtp.sh
+KV_CACHE_DTYPE=fp8 bash serve-qwen38-27b-mtp.sh   # larger KV pool, more concurrency/context headroom
+```
+
+### Performance notes (measured on a single DGX Spark, per the [NVIDIA developer forum writeup](https://forums.developer.nvidia.com/t/qwen3-8-27b-nvfp4-on-a-single-dgx-spark-up-to-1m-context-vllm-mtp-measurements/380244))
+
+Memory budget on the 128 GB **unified** pool at `gpu-memory-utilization=0.45`: weights + overhead ~26.16 GiB, peak activation ~1.80 GiB, KV cache ~27.56 GiB — supporting ~777,645 KV tokens (~2.97x concurrency) at the **full native 262K context**, so unlike the Qwen3.6 script above, context does not need to be scaled down for the shared-box default.
+
+- `gpu-memory-utilization=0.45` — sized to share the 128 GB pool with a second model side-by-side, matching this folder's other recipes. Raise toward 0.85 to run this model alone with more concurrency, or ~0.60 to unlock YaRN scaling toward the model's 1M-token extended context (6.6M KV tokens reported at that scale on Blackwell — needs additional rope-scaling config beyond this launcher's defaults; see the vLLM recipe page below).
+- `kv-cache-dtype=auto` (default) — the measured-working Spark config used full-precision KV; this NVFP4 community quant, like the Gemma 4 checkpoint above, ships no fp8 KV scaling factors. `KV_CACHE_DTYPE=fp8` roughly doubles the KV pool and the launcher adds `--calculate-kv-scales` automatically in that case.
+- `max-num-seqs=4`, `max-num-batched-tokens=8192` — the exact concurrency / prefill-chunk pair measured working on a single Spark for this model.
+- `num_speculative_tokens=5` (MTP) — measured working on Spark; [vLLM's own recipe page](https://recipes.vllm.ai/Qwen/Qwen3.8-27B) suggests 3 as a lighter starting point. Reported decode throughput with MTP: ~24.7 tok/s, TTFT ~0.3s; prefill ranges ~1,734 tok/s at 4.5K tokens down to ~853 tok/s at 48K tokens.
+- Tool/reasoning parsers: `qwen3_coder` / `qwen3` per vLLM's own recipe page. The forum's Spark deployment instead used `qwen3_xml` for tool calls — if tool calls come back unparsed, try `TOOL_PARSER=qwen3_xml`.
+
+**Known issue (fixed upstream):** early copies of the `unsloth/Qwen3.8-27B-NVFP4` tokenizer silently truncated prompts at 2048 tokens. If long-context requests come back truncated, re-pull the checkpoint and check `tokenizer_config.json` for `"truncation": null`.
+
+### Container management
+
+```bash
+docker logs -f vllm-qwen38
+docker stop vllm-qwen38
+docker rm vllm-qwen38
+```
 
 ---
 
@@ -262,3 +328,5 @@ The container is started with `--restart unless-stopped`, so it survives host re
 
 - [vLLM DGX Spark recipe](https://vllm.ai/blog/2026-06-01-vllm-dgx-spark)
 - [vLLM Gemma 4 usage guide](https://docs.vllm.ai/projects/recipes/en/latest/Google/Gemma4.html)
+- [vLLM Qwen3.8-27B recipe](https://recipes.vllm.ai/Qwen/Qwen3.8-27B)
+- [Qwen3.8-27B NVFP4 on a single DGX Spark — vLLM + MTP measurements (NVIDIA developer forum)](https://forums.developer.nvidia.com/t/qwen3-8-27b-nvfp4-on-a-single-dgx-spark-up-to-1m-context-vllm-mtp-measurements/380244)
