@@ -70,15 +70,22 @@
 #      not — their checkpoints carry lm_head.weight_scale / weight_scale_2 /
 #      input_scale sidecars — and are refused.
 #
-#      QUANT=nvfp4 (RadixArk NVFP4-BF16-LMHead) is the interesting case and is
-#      allowed with a warning. Upstream states flatly that 4-bit checkpoints are
-#      blocked "including NVFP4", but that export exists precisely to keep a
-#      dense BF16 head, and its safetensors index carries no lm_head
-#      quantization sidecars at all — unlike RadixArk/Qwen3.8-27B-NVFP4, which
-#      has all three. So NVFP4 + DFlash2 looks possible on this one export.
-#      UNPROVEN: the index read was truncated, and nobody has run it. If it
-#      loads, it is 4-bit weights with DFlash2 drafting, which upstream says
-#      cannot exist. Verify before believing it.
+#      QUANT=nvfp4 (RadixArk NVFP4-BF16-LMHead) WORKS, contradicting upstream.
+#      Upstream states flatly that 4-bit checkpoints are blocked "including
+#      NVFP4", but that export exists precisely to keep a dense BF16 head, and
+#      its safetensors index carries no lm_head quantization sidecars at all —
+#      unlike RadixArk/Qwen3.8-27B-NVFP4, which has all three. MEASURED on a
+#      DGX Spark 2026-08-28, vLLM 0.28.0, this exact script, MAX_NUM_SEQS=1:
+#
+#        server started clean; quantization resolved to modelopt_mixed
+#        "Resolved architecture: DFlash2DraftModel"  <- V2, not a DFlash1 fallback
+#        mean acceptance length 4.70 (upstream reports 4.607 on FP8)
+#        per-position acceptance 0.825 0.737 0.544 0.474 0.386 0.368 0.368
+#        avg draft acceptance 52.9%
+#        45.6 tok/s on code, 28.9 tok/s on prose, 256 max_tokens, temperature 0
+#
+#      So 4-bit NVFP4 + DFlash2 is real on this export, at acceptance parity
+#      with upstream's FP8 numbers — and it saves the ~27 GB FP8 download.
 #
 #   Cost and shape, measured by upstream on a Spark (FP8 target): +3.77 GiB for
 #   the drafter, KV pool down ~37% (980K -> 617K tokens), +30 s load. 29.86
@@ -98,10 +105,22 @@
 #     three together on this build are not something this script has proven.
 #     Upstream has open issues on mamba prefix-caching interacting badly with
 #     MTP on other hybrid models.
-#   - Throughput. Every number in the SGLang README section was measured under
-#     SGLang. None of it transfers. Benchmark before believing anything.
+#   - Throughput for the MTP and DSpark modes. The SGLang README's numbers were
+#     measured under SGLang and do not transfer. The dflash2 + nvfp4 figures
+#     above ARE from this script on this box; nothing else here is.
+#
+# VERIFIED on Spark 2026-08-28 (vLLM 0.28.0 image): CUDA graph capture works on
+# sm_121 despite sm_121 being absent from torch's compiled arch list — FlashInfer
+# JITs for 121a at runtime. "Capturing dflash2 CUDA graphs (FULL)" completed.
 #
 # ----------------------------------------------------------------------------
+# Entrypoint note: the two images disagree. ghcr.io/spark-arena/... does NOT set
+# `vllm serve` as its ENTRYPOINT (the other scripts in this folder prepend it),
+# while the official vllm/vllm-openai image DOES — passing `vllm serve ...` to
+# the latter yields `vllm serve vllm serve <model>` and argparse rejects it. So
+# this script pins --entrypoint vllm and passes `serve` itself, which is correct
+# for both regardless of which IMAGE you point it at.
+#
 # Port note: defaults to 8000, same as the other scripts here. Only one can hold
 # it — stop the others or pass PORT=8888.
 
@@ -146,10 +165,14 @@ SPEC_TOKENS="${SPEC_TOKENS:-3}"                      # SGLang SPEC_STEPS=3 peak 
 
 # DFlash2 needs vLLM >= 0.27.1, which the spark-arena build (0.22) does not
 # meet, so the default image depends on the mode. Both are arm64 + CUDA 13.
-case "$SPEC_MODE" in
-  dflash2|dspark) IMAGE="${IMAGE:-vllm/vllm-openai:v0.28.0-aarch64}" ;;
-  *)              IMAGE="${IMAGE:-ghcr.io/spark-arena/dgx-vllm-eugr-nightly}" ;;
-esac
+# vllm/vllm-openai:v0.28.0-aarch64 for every mode: arm64, CUDA 13.0.2, and
+# verified running end-to-end on GB10 (a real generate, not just an import).
+# The drafted modes REQUIRE it (dflash2 needs >= 0.27.1, dspark >= 0.25); MTP
+# would also run on the older spark-arena 0.22 build, but defaulting to two
+# different images by mode makes the effective runtime depend on a flag you did
+# not set, which is worse than the version bump. Set IMAGE=ghcr.io/spark-arena/
+# dgx-vllm-eugr-nightly to pin the 0.22 build back for MTP.
+IMAGE="${IMAGE:-vllm/vllm-openai:v0.28.0-aarch64}"
 DFLASH2_DRAFT_MODEL="${DFLASH2_DRAFT_MODEL:-incoai/Qwen3.8-27B-DFlash2}"
 DFLASH2_TOKENS="${DFLASH2_TOKENS:-7}"                # caps at 7 (block_size 8)
 DSPARK_DRAFT_MODEL="${DSPARK_DRAFT_MODEL:-Doopeworld/Qwen3.8-27B-DSpark-vLLM}"
@@ -162,7 +185,11 @@ ATTENTION_BACKEND="${ATTENTION_BACKEND:-FLASHINFER}" # TRITON_ATTN is the fallba
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 MAMBA_SSM_CACHE_DTYPE="${MAMBA_SSM_CACHE_DTYPE:-bfloat16}"
 MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"        # required for GDN on vLLM
-GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.95}"                 # SGLang MEM_FRACTION_STATIC (MTP default)
+# 0.92, not the SGLang recipe's 0.95. vLLM's check is against *free* memory at
+# startup, not total: on an otherwise-idle Spark with only a 69 MiB container up,
+# free was 114.97 GiB and 0.95 asks for 115.6 — it refuses to start, short by
+# 0.63 GiB. 0.92 (~112 GiB) leaves room for the host and whatever else is up.
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.92}"                 # SGLang MEM_FRACTION_STATIC, minus real-world headroom
 REASONING_PARSER="${REASONING_PARSER:-qwen3}"
 TOOL_PARSER="${TOOL_PARSER:-qwen3_coder}"
 AGENTIC="${AGENTIC:-1}"
@@ -176,11 +203,10 @@ case "$SPEC_MODE" in
     case "$QUANT" in
       fp8|bf16) : ;;
       nvfp4)
-        echo "WARNING: DFlash2 on QUANT=nvfp4 (RadixArk NVFP4-BF16-LMHead) is UNPROVEN." >&2
-        echo "         That export keeps a dense BF16 head and ships no lm_head quant" >&2
-        echo "         sidecars, so it should satisfy DFlash2's unquantized-head rule —" >&2
-        echo "         but upstream states 4-bit is blocked outright. If vLLM refuses" >&2
-        echo "         the head, fall back to QUANT=fp8." >&2 ;;
+        echo "NOTE: DFlash2 on QUANT=nvfp4 (RadixArk NVFP4-BF16-LMHead) is measured" >&2
+        echo "      working on Spark despite upstream saying 4-bit is blocked: that" >&2
+        echo "      export keeps a dense BF16 head. Acceptance length 4.70, 45.6 tok/s" >&2
+        echo "      on code at MAX_NUM_SEQS=1. Fall back to QUANT=fp8 if it regresses." >&2 ;;
       *)
         echo "ERROR: SPEC_MODE=dflash2 needs a target with an UNQUANTIZED lm_head." >&2
         echo "       QUANT=$QUANT ships lm_head.weight_scale/input_scale sidecars, which" >&2
@@ -322,8 +348,9 @@ docker run -d \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -v "${HF_CACHE}:/root/.cache/huggingface" \
   -v "${VLLM_CACHE}:/root/.cache/vllm" \
+  --entrypoint vllm \
   "$IMAGE" \
-  vllm serve "${SERVE_FLAGS[@]}"
+  serve "${SERVE_FLAGS[@]}"
 
 # ---- Wait for readiness -----------------------------------------------------
 AUTH_HEADER="Authorization: Bearer ${API_KEY}"
