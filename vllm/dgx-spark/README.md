@@ -8,10 +8,16 @@ vLLM launch scripts for NVIDIA DGX Spark (GB10, `sm_121`), with OpenAI-compatibl
 | `serve-qwen36-35b-a3b-dflash.sh` | `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | Docker-based, DFlash speculative decoding |
 | `serve-diffusiongemma-26b-a4b.sh` | `RedHatAI/diffusiongemma-26B-A4B-it-NVFP4` | Docker-based, diffusion decoding (V2 model runner) |
 | `serve-qwen38-27b-mtp.sh` | `unsloth/Qwen3.8-27B-NVFP4` | Docker-based, dense hybrid-attention VLM, built-in MTP speculative decoding |
+| `serve-qwen38-27b-sglang.sh` | `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead` | **SGLang** engine, same model — GB10-tuned GDN pool, FP8 KV, MTP or DSpark drafting, YaRN to 1M |
 
 ---
 
 ## Qwen3.8-27B (MTP)
+
+> There is now an **SGLang** recipe for this same model — see
+> [Qwen3.8-27B (SGLang)](#qwen38-27b-sglang). It is faster on code and carries the
+> GB10-specific tuning; this vLLM script remains the lighter-footprint option for
+> sharing the box.
 
 **unsloth/Qwen3.8-27B-NVFP4** — a dense, hybrid-attention (linear attention on 48 of 64 layers), natively multimodal (vision-capable) model with a built-in Multi-Token Prediction (MTP) draft head baked into the checkpoint, 262,144-token native context, and NVFP4 weights that fit a single Blackwell GPU at ~24.6 GiB.
 
@@ -72,6 +78,141 @@ Memory budget on the 128 GB **unified** pool at `gpu-memory-utilization=0.45`: w
 docker logs -f vllm-qwen38
 docker stop vllm-qwen38
 docker rm vllm-qwen38
+```
+
+---
+
+## Qwen3.8-27B (SGLang)
+
+Same model as the section above, different engine. `serve-qwen38-27b-sglang.sh`
+runs Qwen3.8-27B on **SGLang** instead of vLLM, because that is where the
+GB10-specific tuning for this architecture actually exists: the hybrid gated
+delta net (48 linear-attention layers + 16 full-attention) needs its recurrent
+state pool sized by hand, and SGLang exposes the knobs to do it.
+
+The flag stack follows
+[MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark](https://github.com/MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark),
+which starts from the [SGLang cookbook's DGX Spark cell](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B)
+and then pins each choice against on-device measurement rather than guesswork.
+
+### Quick start
+
+```bash
+export HF_TOKEN=hf_xxx
+bash serve-qwen38-27b-sglang.sh                 # MTP drafting (default)
+SPEC_MODE=dspark bash serve-qwen38-27b-sglang.sh  # DSpark drafting — much faster on code
+```
+
+Serves on port **8000**, the same port the vLLM scripts in this folder use, so
+only one of them can be up at a time. Stop the vLLM container first
+(`docker stop vllm-qwen38`), or pass `PORT=8888` to run both side by side.
+
+### Which drafter
+
+Upstream's measured numbers, on their Spark. Code and essay are `bench/ndec.py`
+net-decode, n=5; DSpark/MTP measured 2026-08-18, DFlash2 2026-08-19.
+
+| Probe | DSpark (block-7) | MTP (EAGLE 3/1/4) |
+|---|---|---|
+| Code — LRUCache + small test | **51.5 tok/s** | 34.5 tok/s |
+| Long essay — Babbage → GPUs | 18.3 tok/s | **24.1 tok/s** |
+
+**DSpark for code, agents, and tool calls; MTP for long-form prose.** DSpark is
+~1.5x on the code probe and gives roughly a quarter of the essay rate back.
+
+Read those as indicative, not a race: the two columns come from different days,
+and upstream treats code deltas under 15% as noise within a session. MTP costs
+no extra download (the draft head is in the checkpoint); DSpark pulls a separate
+~2.7 GB drafter. Upstream's step sweep confirms 3/1/4 is the MTP peak here
+(2 → 12.8, 3 → 17.2, 4 → 16.8, 5 → 16.3, 6 → 15.8 tok/s).
+
+Upstream also supports a third drafter, DFlash2, which needs a derived image
+built from their `patch/` tree — not wired into this script. Use their repo if
+you want it.
+
+### How this differs from the vLLM script
+
+| | `serve-qwen38-27b-mtp.sh` (vLLM) | `serve-qwen38-27b-sglang.sh` (SGLang) |
+|---|---|---|
+| Checkpoint | `unsloth/Qwen3.8-27B-NVFP4` | `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead` |
+| Memory | `--gpu-memory-utilization 0.45` (shares the box) | `--mem-fraction-static 0.95` (claims it) |
+| KV cache | `auto`, full precision | `fp8_e4m3` |
+| Port | 8000 | 8000 (same — one at a time) |
+
+Two things worth calling out, because they contradict the section above:
+
+- **The checkpoint is different, deliberately.** The RadixArk export is what the
+  cookbook recipes were measured against, and it never had the 2048-token
+  tokenizer truncation bug documented in the MTP section. `QUANT=nvfp4-fp4`
+  selects the packed-FP4-head twin (~22 GB vs ~24 GB).
+- **KV precision flips.** The vLLM script runs full-precision KV because the
+  unsloth export ships no FP8 KV scales. The RadixArk checkpoint *declares*
+  `kv_cache_quant_algo: FP8` and ships calibration scales, so this script sets
+  `--kv-cache-dtype fp8_e4m3` explicitly. ~32.8 KB/token — a full 1M-token
+  sequence is ~33 GB of KV.
+
+**This script defaults to claiming nearly the whole 128 GB pool** (`0.95`, or
+`0.90` with a drafter loaded), unlike this folder's other recipes which default
+to `0.45` to leave room for a second model. Lower `MEM_FRACTION_STATIC` if you
+are sharing the box.
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `QUANT` | `nvfp4` | `nvfp4` (BF16 head) · `nvfp4-fp4` (packed FP4 head) · `fp8` · `bf16` |
+| `SPEC_MODE` | `mtp` | `mtp` · `dspark` · `none` |
+| `PORT` | `8000` | Shared with the vLLM scripts; set `8888` to run both at once |
+| `HOST_BIND` | `0.0.0.0` | SGLang `--host`; `127.0.0.1` restricts to this box |
+| `CONTEXT_LENGTH` | `262144` | Native; up to `1000000` with `YARN=1` |
+| `YARN` | `0` | Rope scaling, required above native context. **MTP only** |
+| `MAX_CONCURRENT_REQUESTS` | `10` | Also sizes the GDN state pool (× 4 slots) |
+| `MEM_FRACTION_STATIC` | `0.95` / `0.90` | 0.90 when `SPEC_MODE=dspark` |
+| `ATTENTION_BACKEND` | `flashinfer` | Required on sm_121; `triton` is the fallback |
+| `CHUNKED_PREFILL` | `8192` | 2048 smooths inter-token latency at some prefill cost |
+| `CPUSET` | `5-9,15-19` | GB10's Cortex-X5 cores; `""` disables pinning |
+| `MAMBA_SKIP_DECODE_LOCK` | `0` | `1` frees one GDN slot per request (S 4 → 3) |
+| `PREFILL_CUDA_GRAPH` | `0` | `1` re-enables prefill CUDA graphs |
+| `DSPARK_BLOCK_SIZE` | `7` | Code peak; `5` trades −16% code for +8% prose |
+| `PRIVILEGED` | `0` | Upstream runs `--privileged`; opt in if boot needs it |
+| `EXTRA_ARGS` | _(empty)_ | Appended last; argparse last-wins |
+
+### Why the odd-looking flags
+
+- **`--attention-backend flashinfer` is mandatory on GB10.** The cookbook's
+  `trtllm_mha` is SM100-only and will not run on sm_121.
+- **GDN state pool.** `--mamba-full-memory-ratio 4.21` replaces the `0.9`
+  default, which over-provisions KV and silently clamps concurrency.
+  `--max-mamba-cache-size` is pinned to `concurrency × 4` — speculative verify
+  states live in a *separate* buffer, so folding draft tokens in over-provisions
+  the pool 2x. `--mamba-ssm-dtype bfloat16` keeps a slot at 78.4 MB against the
+  fp32 default's 153.9 MB.
+- **`--max-running-requests` is pinned** because speculative decoding otherwise
+  resets it to 48 behind your back. The script greps the boot log and prints the
+  cap it actually got, so you can see if it stuck.
+- **CPU pinning matters here.** GB10 is big.LITTLE; without `--cpuset-cpus` the
+  scheduler and tokenizer land on the 2.8 GHz A725 cores about half the time.
+  Measured +2–7% decode upstream.
+
+### Gotchas
+
+- **YaRN is MTP-only.** Above 262K the rope override leaks into the draft
+  model's config and crashes the rope validator (`AttributeError: …
+  max_position_embeddings`). The script refuses `YARN=1` with `SPEC_MODE=dspark`
+  rather than letting you find out at boot.
+- **Don't run a drafter at `0.95`.** Upstream hard-rebooted the box that way.
+  The script drops to `0.90` automatically for `SPEC_MODE=dspark`.
+- **Spec decode erroring at boot?** Retry with `ATTENTION_BACKEND=triton`.
+- Thinking is **on by default**; disable per request with
+  `chat_template_kwargs: {"enable_thinking": false}`. Tool calling needs no
+  vLLM-style `--enable-auto-tool-choice` — just send `tools`.
+
+### Container management
+
+```bash
+docker logs -f sglang-qwen38
+docker stop sglang-qwen38
+docker rm sglang-qwen38
 ```
 
 ---
@@ -329,4 +470,6 @@ The container is started with `--restart unless-stopped`, so it survives host re
 - [vLLM DGX Spark recipe](https://vllm.ai/blog/2026-06-01-vllm-dgx-spark)
 - [vLLM Gemma 4 usage guide](https://docs.vllm.ai/projects/recipes/en/latest/Google/Gemma4.html)
 - [vLLM Qwen3.8-27B recipe](https://recipes.vllm.ai/Qwen/Qwen3.8-27B)
+- [SGLang cookbook — Qwen3.8-27B](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B)
+- [MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark](https://github.com/MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark) — source of the SGLang flag stack and the measured numbers quoted above
 - [Qwen3.8-27B NVFP4 on a single DGX Spark — vLLM + MTP measurements (NVIDIA developer forum)](https://forums.developer.nvidia.com/t/qwen3-8-27b-nvfp4-on-a-single-dgx-spark-up-to-1m-context-vllm-mtp-measurements/380244)
