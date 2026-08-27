@@ -32,7 +32,8 @@
 #   --mamba-full-memory-ratio 4.21     none                               NO
 #   --max-mamba-cache-size N           none                               NO
 #   --disable-prefill-cuda-graph       none                               NO
-#   SPEC_MODE=dspark                   needs vLLM >= 0.25 + custom code   NO
+#   SPEC_MODE=dspark                   method=dspark, needs vLLM >= 0.25   yes*
+#   SPEC_MODE=dflash2                  method=dflash, needs vLLM >= 0.27.1 yes*
 #   YaRN via rope_parameters           --hf-overrides (no --rope-scaling) differs
 #
 # The two GDN pool flags are the notable loss. SGLang lets you pin the recurrent
@@ -46,13 +47,45 @@
 # --mamba-cache-mode align has no SGLang counterpart but is REQUIRED on vLLM for
 # GDN layers; the `all` mode is unsupported for this architecture.
 #
-# DSpark does not port. The drafter exists for vLLM (Doopeworld/
-# Qwen3.8-27B-DSpark-vLLM, --speculative-config method=dspark, 7 tokens) but
-# needs vLLM >= 0.25 plus a custom modeling file, and the Spark image here is
-# 0.22. The script refuses SPEC_MODE=dspark rather than failing at load. Note
-# also that upstream reports DSpark's adaptive-verification confidence head is
-# inert on Qwen3.8 under vLLM, because GDN layers use GDNAttentionBackend — so
-# even on a new enough build you get block drafting without adaptive verify.
+# DSpark ports only on a newer image. `dspark` is absent from the spark-arena
+# 0.22 build's method list but PRESENT in vLLM 0.28.0 (verified by reading
+# SpeculativeMethod's literals in both images). So SPEC_MODE=dspark switches to
+# the same newer image dflash2 uses, and is refused only if you force IMAGE back
+# to a build that lacks it. Upstream reports DSpark's adaptive-verification
+# confidence head is inert on Qwen3.8 under vLLM, because GDN layers use
+# GDNAttentionBackend — so you get block drafting without adaptive verify.
+#
+# DFlash2 DOES port, on a newer image. SPEC_MODE=dflash2 uses the in-tree
+# `dflash` method with the incoai/Qwen3.8-27B-DFlash2 drafter. Two hard
+# requirements, both enforced below rather than left to fail at load:
+#
+#   1. vLLM >= 0.27.1. `dflash` is present in 0.22 but that is DFlash*1*; a
+#      DFlash2 checkpoint on an old runtime DRAFTS AS DFLASH1 SILENTLY rather
+#      than erroring. Selecting dflash2 therefore switches the default IMAGE to
+#      vllm/vllm-openai:v0.28.0-aarch64 (arm64, CUDA 13.0.2) instead of the
+#      spark-arena 0.22 build.
+#   2. An UNQUANTIZED LM HEAD. The DFlash2 selector reads the target's top-16
+#      candidates straight off the head, so vLLM refuses a quantized one.
+#      QUANT=fp8 and QUANT=bf16 qualify. QUANT=nvfp4-fp4 and QUANT=unsloth do
+#      not — their checkpoints carry lm_head.weight_scale / weight_scale_2 /
+#      input_scale sidecars — and are refused.
+#
+#      QUANT=nvfp4 (RadixArk NVFP4-BF16-LMHead) is the interesting case and is
+#      allowed with a warning. Upstream states flatly that 4-bit checkpoints are
+#      blocked "including NVFP4", but that export exists precisely to keep a
+#      dense BF16 head, and its safetensors index carries no lm_head
+#      quantization sidecars at all — unlike RadixArk/Qwen3.8-27B-NVFP4, which
+#      has all three. So NVFP4 + DFlash2 looks possible on this one export.
+#      UNPROVEN: the index read was truncated, and nobody has run it. If it
+#      loads, it is 4-bit weights with DFlash2 drafting, which upstream says
+#      cannot exist. Verify before believing it.
+#
+#   Cost and shape, measured by upstream on a Spark (FP8 target): +3.77 GiB for
+#   the drafter, KV pool down ~37% (980K -> 617K tokens), +30 s load. 29.86
+#   tok/s fresh single-stream, 49.20 edit-heavy, acceptance length 4.607.
+#   BUT the crossover is at c=2: at concurrency >= 2 DFlash2 LOSES to 4-bit+MTP.
+#   This script defaults MAX_NUM_SEQS=10, so dflash2 warns if you leave it there.
+#   k caps at 7 (the drafter's dflash_config.block_size is 8).
 #
 # ----------------------------------------------------------------------------
 # UNVERIFIED — read before trusting this on real traffic:
@@ -86,7 +119,6 @@ case "$QUANT" in
 esac
 MODEL="${MODEL_OVERRIDE:-$MODEL}"
 SERVED_NAME="${SERVED_NAME:-$MODEL}"
-IMAGE="${IMAGE:-ghcr.io/spark-arena/dgx-vllm-eugr-nightly}"
 PORT="${PORT:-8000}"
 BIND_ADDR="${BIND_ADDR:-0.0.0.0}"
 CONTAINER_NAME="${CONTAINER_NAME:-vllm-qwen38-tuned}"
@@ -109,8 +141,19 @@ if [[ -z "$API_KEY" ]]; then
   API_KEY_GENERATED=1
 fi
 
-SPEC_MODE="${SPEC_MODE:-mtp}"                        # mtp | none  (dspark unsupported here)
+SPEC_MODE="${SPEC_MODE:-mtp}"                        # mtp | dflash2 | dspark | none
 SPEC_TOKENS="${SPEC_TOKENS:-3}"                      # SGLang SPEC_STEPS=3 peak maps to this
+
+# DFlash2 needs vLLM >= 0.27.1, which the spark-arena build (0.22) does not
+# meet, so the default image depends on the mode. Both are arm64 + CUDA 13.
+case "$SPEC_MODE" in
+  dflash2|dspark) IMAGE="${IMAGE:-vllm/vllm-openai:v0.28.0-aarch64}" ;;
+  *)              IMAGE="${IMAGE:-ghcr.io/spark-arena/dgx-vllm-eugr-nightly}" ;;
+esac
+DFLASH2_DRAFT_MODEL="${DFLASH2_DRAFT_MODEL:-incoai/Qwen3.8-27B-DFlash2}"
+DFLASH2_TOKENS="${DFLASH2_TOKENS:-7}"                # caps at 7 (block_size 8)
+DSPARK_DRAFT_MODEL="${DSPARK_DRAFT_MODEL:-Doopeworld/Qwen3.8-27B-DSpark-vLLM}"
+DSPARK_TOKENS="${DSPARK_TOKENS:-7}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"             # 262144 .. 1000000
 YARN="${YARN:-0}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-10}"                   # SGLang MAX_CONCURRENT_REQUESTS
@@ -128,13 +171,43 @@ EXTRA_ARGS="${EXTRA_ARGS:-}"
 # ---- Validate ---------------------------------------------------------------
 case "$SPEC_MODE" in
   mtp|none) : ;;
+  dflash2)
+    # Hard requirement: the drafter reads top-16 candidates off an unquantized head.
+    case "$QUANT" in
+      fp8|bf16) : ;;
+      nvfp4)
+        echo "WARNING: DFlash2 on QUANT=nvfp4 (RadixArk NVFP4-BF16-LMHead) is UNPROVEN." >&2
+        echo "         That export keeps a dense BF16 head and ships no lm_head quant" >&2
+        echo "         sidecars, so it should satisfy DFlash2's unquantized-head rule —" >&2
+        echo "         but upstream states 4-bit is blocked outright. If vLLM refuses" >&2
+        echo "         the head, fall back to QUANT=fp8." >&2 ;;
+      *)
+        echo "ERROR: SPEC_MODE=dflash2 needs a target with an UNQUANTIZED lm_head." >&2
+        echo "       QUANT=$QUANT ships lm_head.weight_scale/input_scale sidecars, which" >&2
+        echo "       vLLM's DFlash2 selector refuses. Use QUANT=fp8 (measured by upstream)" >&2
+        echo "       or QUANT=bf16; QUANT=nvfp4 is an unproven maybe." >&2
+        exit 1 ;;
+    esac
+    if (( DFLASH2_TOKENS > 7 )); then
+      echo "ERROR: DFLASH2_TOKENS caps at 7 (drafter block_size is 8); got $DFLASH2_TOKENS." >&2
+      exit 1
+    fi
+    if (( MAX_NUM_SEQS >= 2 )); then
+      echo "NOTE: DFlash2's crossover is at c=2 — at MAX_NUM_SEQS=$MAX_NUM_SEQS it is" >&2
+      echo "      expected to LOSE to 4-bit + MTP. It wins single-stream. Set" >&2
+      echo "      MAX_NUM_SEQS=1 for the drafted latency win, or use SPEC_MODE=mtp." >&2
+    fi
+    echo "NOTE: verify DFlash2 actually engaged — a DFlash2 checkpoint on a runtime" >&2
+    echo "      older than 0.27.1 drafts as DFlash1 SILENTLY. Check the startup log." >&2
+    ;;
   dspark)
-    echo "ERROR: SPEC_MODE=dspark is not supported by this recipe." >&2
-    echo "       vLLM DSpark needs >= 0.25 plus a custom modeling file; the Spark" >&2
-    echo "       image here is 0.22.x. Use serve-qwen38-27b-sglang.sh for DSpark," >&2
-    echo "       or SPEC_MODE=mtp here." >&2
-    exit 1 ;;
-  *) echo "ERROR: SPEC_MODE must be mtp or none (got '$SPEC_MODE')" >&2; exit 1 ;;
+    echo "NOTE: DSpark needs vLLM >= 0.25; the default image for this mode is the" >&2
+    echo "      0.28.0 build, not the spark-arena 0.22 one. If you overrode IMAGE," >&2
+    echo "      make sure it is new enough or vLLM will reject method=dspark." >&2
+    echo "NOTE: DSpark's adaptive-verification head is inert on Qwen3.8 under vLLM" >&2
+    echo "      (GDN layers use GDNAttentionBackend) — block drafting only." >&2
+    ;;
+  *) echo "ERROR: SPEC_MODE must be mtp, dflash2, dspark, or none (got '$SPEC_MODE')" >&2; exit 1 ;;
 esac
 
 if (( MAX_MODEL_LEN < 262144 || MAX_MODEL_LEN > 1000000 )); then
@@ -181,6 +254,10 @@ fi
 
 if [[ "$SPEC_MODE" == "mtp" ]]; then
   SERVE_FLAGS+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${SPEC_TOKENS}}")
+elif [[ "$SPEC_MODE" == "dflash2" ]]; then
+  SERVE_FLAGS+=(--speculative-config "{\"method\":\"dflash\",\"model\":\"${DFLASH2_DRAFT_MODEL}\",\"num_speculative_tokens\":${DFLASH2_TOKENS}}")
+elif [[ "$SPEC_MODE" == "dspark" ]]; then
+  SERVE_FLAGS+=(--speculative-config "{\"method\":\"dspark\",\"model\":\"${DSPARK_DRAFT_MODEL}\",\"num_speculative_tokens\":${DSPARK_TOKENS},\"draft_sample_method\":\"probabilistic\"}")
 fi
 
 # vLLM in this image exposes no --rope-scaling; YaRN goes through --hf-overrides.
@@ -204,14 +281,17 @@ mkdir -p "$HF_CACHE" "$VLLM_CACHE"
 
 # ---- Pre-stage weights ------------------------------------------------------
 if [[ "$SKIP_PRESTAGE" != "1" ]]; then
-  echo "Pre-staging $MODEL into $HF_CACHE ..."
+  PRESTAGE_MODELS="$MODEL"
+  [[ "$SPEC_MODE" == "dflash2" ]] && PRESTAGE_MODELS="$MODEL $DFLASH2_DRAFT_MODEL"
+  [[ "$SPEC_MODE" == "dspark" ]] && PRESTAGE_MODELS="$MODEL $DSPARK_DRAFT_MODEL"
+  echo "Pre-staging $PRESTAGE_MODELS into $HF_CACHE ..."
   docker run --rm \
     -e HF_TOKEN="${HF_TOKEN:-}" \
-    -e MODEL="$MODEL" \
+    -e MODELS="$PRESTAGE_MODELS" \
     -v "${HF_CACHE}:/root/.cache/huggingface" \
     --entrypoint bash \
     "$IMAGE" \
-    -c 'if command -v hf >/dev/null 2>&1; then hf download "$MODEL"; else huggingface-cli download "$MODEL"; fi'
+    -c 'for m in $MODELS; do if command -v hf >/dev/null 2>&1; then hf download "$m"; else huggingface-cli download "$m"; fi; done'
   echo "Pre-stage complete."
 else
   echo "Skipping pre-stage (SKIP_PRESTAGE=1)."
@@ -225,6 +305,9 @@ fi
 
 echo "Starting vLLM container '$CONTAINER_NAME' serving $MODEL ..."
 echo "  spec=$SPEC_MODE  attn=$ATTENTION_BACKEND  kv=$KV_CACHE_DTYPE  gmu=$GPU_MEM_UTIL  seqs=$MAX_NUM_SEQS"
+echo "  image=$IMAGE"
+[[ "$SPEC_MODE" == "dflash2" ]] && echo "  drafter=$DFLASH2_DRAFT_MODEL k=$DFLASH2_TOKENS (+3.77 GiB, KV pool -37%)"
+[[ "$SPEC_MODE" == "dspark" ]] && echo "  drafter=$DSPARK_DRAFT_MODEL k=$DSPARK_TOKENS"
 (( NEED_YARN )) && echo "  YaRN rope scaling to $MAX_MODEL_LEN via --hf-overrides"
 
 DOCKER_FLAGS=(--shm-size="$SHM_SIZE")
