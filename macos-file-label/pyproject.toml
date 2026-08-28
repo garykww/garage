@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "macos-file-label"
+version = "0.1.0"
+description = "Read and set macOS Finder color labels from the command line"
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+macos-file-label = "macos_file_label.cli:main"
+
+[tool.setuptools]
+packages = ["macos_file_label"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
