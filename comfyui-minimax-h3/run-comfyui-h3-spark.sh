@@ -87,6 +87,16 @@ CHECKPOINT_SET="${CHECKPOINT_SET:-fl2va}"
 
 HF_REPO="${HF_REPO:-Comfy-Org/MiniMax-H3}"
 
+# TURBO_LORAS pre-stages step-distillation LoRAs from lightx2v/Minimax-h3-Turbo
+# -- comma-separated, from: fl2v-4step, fl2v-8step, ref2v-4step, ref2v-8step,
+# none. A turbo LoRA reproduces the base model's output in far fewer sampling
+# steps at some cost to fidelity; skip a workflow's LoRA (leave it out of this
+# list, or set QUANT-equivalent "none") to sample the full model instead.
+# DEFAULT covers fl2va's own draft/fast split; the ref2v-* pair only matters
+# once CHECKPOINT_SET includes ref2va, so they're opt-in rather than default.
+TURBO_LORAS="${TURBO_LORAS:-fl2v-4step,fl2v-8step}"
+HF_TURBO_REPO="${HF_TURBO_REPO:-lightx2v/Minimax-h3-Turbo}"
+
 MODELS_DIR="${MODELS_DIR:-$HOME/.cache/comfyui-h3/models}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/comfyui-h3-output}"
 INPUT_DIR="${INPUT_DIR:-$HOME/comfyui-h3-input}"   # reference images/video for I2V/R2V workflows
@@ -102,6 +112,11 @@ SKIP_PRESTAGE="${SKIP_PRESTAGE:-0}"
 # weights are loaded before your first real request. Off by default -- see
 # design note above.
 WARMUP="${WARMUP:-0}"
+# Opt-in: passes ComfyUI's --use-sage-attention flag. Only works if IMAGE was
+# built with `--build-arg ENABLE_SAGEATTENTION=1` -- otherwise the package
+# isn't installed and startup fails. See the Dockerfile's SageAttention
+# comment for why this is a separate build-time vs. run-time switch.
+USE_SAGE_ATTENTION="${USE_SAGE_ATTENTION:-0}"
 
 # ---- Resolve QUANT -> exact filenames ----------------------------------------
 case "$QUANT" in
@@ -118,7 +133,24 @@ case "$CHECKPOINT_SET" in
   *) echo "ERROR: CHECKPOINT_SET must be fl2va|fl2va+ref2va (got '$CHECKPOINT_SET')" >&2; exit 1 ;;
 esac
 
-mkdir -p "$MODELS_DIR"/diffusion_models "$MODELS_DIR"/text_encoders "$MODELS_DIR"/vae \
+# ---- Resolve TURBO_LORAS -> exact filenames ----------------------------------
+LORA_FILES=()
+IFS=',' read -ra TURBO_LORA_TOKENS <<< "$TURBO_LORAS"
+for token in "${TURBO_LORA_TOKENS[@]}"; do
+  case "$token" in
+    none) ;;
+    fl2v-4step)  LORA_FILES+=("minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors") ;;
+    fl2v-8step)  LORA_FILES+=("minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors") ;;
+    ref2v-4step) LORA_FILES+=("minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors") ;;
+    ref2v-8step) LORA_FILES+=("minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors") ;;
+    *) echo "ERROR: TURBO_LORAS entries must be from fl2v-4step|fl2v-8step|ref2v-4step|ref2v-8step|none (got '$token')" >&2; exit 1 ;;
+  esac
+  if [[ "$token" == ref2v-* && "$CHECKPOINT_SET" != *ref2va* ]]; then
+    echo "WARNING: TURBO_LORAS includes '$token' but CHECKPOINT_SET=$CHECKPOINT_SET has no ref2va checkpoint to pair it with." >&2
+  fi
+done
+
+mkdir -p "$MODELS_DIR"/diffusion_models "$MODELS_DIR"/text_encoders "$MODELS_DIR"/vae "$MODELS_DIR"/loras \
          "$OUTPUT_DIR" "$INPUT_DIR"
 
 # ---- Pre-flight ---------------------------------------------------------------
@@ -149,6 +181,23 @@ if [[ "$SKIP_PRESTAGE" != "1" ]]; then
     "$IMAGE" \
     -c "hf download '$HF_REPO' ${INCLUDE_ARGS[*]@Q} --local-dir /staging"
   echo "Pre-stage complete."
+
+  # Turbo LoRAs live in a separate repo from the base weights above, and its
+  # files sit at repo root (not under a diffusion_models/ prefix), so this is
+  # its own `hf download` pointed at the loras/ subdir of the same mount.
+  if [[ "${#LORA_FILES[@]}" -gt 0 ]]; then
+    LORA_INCLUDE_ARGS=()
+    for f in "${LORA_FILES[@]}"; do LORA_INCLUDE_ARGS+=(--include "$f"); done
+
+    echo "Pre-staging turbo LoRAs (TURBO_LORAS=$TURBO_LORAS) from $HF_TURBO_REPO ..."
+    docker run --rm \
+      -e HF_TOKEN="${HF_TOKEN:-}" \
+      -v "${MODELS_DIR}/loras:/staging" \
+      --entrypoint bash \
+      "$IMAGE" \
+      -c "hf download '$HF_TURBO_REPO' ${LORA_INCLUDE_ARGS[*]@Q} --local-dir /staging"
+    echo "Turbo LoRA pre-stage complete."
+  fi
 else
   echo "Skipping pre-stage (SKIP_PRESTAGE=1); using existing $MODELS_DIR."
 fi
@@ -163,17 +212,30 @@ echo "Starting ComfyUI container '$CONTAINER_NAME' ..."
 #   --restart unless-stopped  auto-restart on crash/reboot, stays down after an explicit `docker stop`
 #   --gpus all              expose the GB10 GPU to the container
 #   -p BIND_ADDR:PORT:8188  publish ComfyUI's port; BIND_ADDR controls reachability
-#   -v MODELS_DIR           the diffusion_models/text_encoders/vae tree pre-staged above
+#   -v MODELS_DIR           the diffusion_models/text_encoders/vae/loras tree pre-staged above --
+#                           a single whole-directory mount is deliberate: a live container on
+#                           nv-spark-01 once drifted to individual per-file binds instead (to add
+#                           weights without a restart), which is a reasonable stopgap but not what
+#                           this script produces -- a fresh run always gets this mount, so treat
+#                           per-file binds as a manual, temporary deviation, not a second supported
+#                           shape.
 #   -v OUTPUT_DIR           generated videos land here on the host
 #   -v INPUT_DIR            reference images/video for I2V/R2V workflows
 #   -v WORKFLOWS_DIR        vendored workflow templates -> ComfyUI's per-user workflow list
+#
+# CMD args are passed explicitly (rather than left to the image's default
+# CMD) so USE_SAGE_ATTENTION can append --use-sage-attention; the first two
+# args reproduce the Dockerfile's own default CMD.
+RUN_ARGS=(--listen 0.0.0.0 --port 8188)
+if [[ "$USE_SAGE_ATTENTION" == "1" ]]; then RUN_ARGS+=(--use-sage-attention); fi
+
 docker run -d --name "$CONTAINER_NAME" --ipc=host --restart unless-stopped \
   --gpus all -p "${BIND_ADDR}:${PORT}:8188" \
   -v "${MODELS_DIR}:/workspace/ComfyUI/models" \
   -v "${OUTPUT_DIR}:/workspace/ComfyUI/output" \
   -v "${INPUT_DIR}:/workspace/ComfyUI/input" \
   -v "${WORKFLOWS_DIR}:/workspace/ComfyUI/user/default/workflows" \
-  "$IMAGE"
+  "$IMAGE" "${RUN_ARGS[@]}"
 
 # ---- Wait for readiness -------------------------------------------------------
 # This confirms the web server/API is up -- NOT that weights are loaded.

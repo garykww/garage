@@ -123,10 +123,32 @@ doubles the diffusion-model footprint) to add reference-to-video support.
 
 ## Optional: SageAttention
 
-The `Dockerfile` accepts `--build-arg ENABLE_SAGEATTENTION=1` to install SageAttention, which
-roughly doubles generation speed. It's **off by default**: there's a known accuracy issue on
-sm_120-class Blackwell FP8 PV kernels ([`Comfy-Org/ComfyUI#15263`](https://github.com/Comfy-Org/ComfyUI/issues/15263)),
-and Spark's `sm_121` is untested for it. Only enable after validating output quality without it.
+The `Dockerfile` accepts `--build-arg ENABLE_SAGEATTENTION=1` to build SageAttention 2.2.0 from
+source (PyPI only goes up to 1.0.6), targeting sm_121 — see the Dockerfile's own comments for why
+that's a source build with specific `TORCH_CUDA_ARCH_LIST` values and a runtime dispatch patch,
+not a plain `pip install`. It's **off by default**: there's a known accuracy issue on sm_120-class
+Blackwell FP8 PV kernels ([`Comfy-Org/ComfyUI#15263`](https://github.com/Comfy-Org/ComfyUI/issues/15263)).
+**Verified on `sm_121` (nv-spark-01, 2026-09-08/09)**: finite output, max abs diff ~0.037 vs.
+reference attention — expected for a quantized int8/fp8 kernel, not a correctness bug — and an
+end-to-end render through this recipe's own `draft` and `quality` presets both succeeded (`draft`
+~10% faster; attention is a small share of a 4-step render, so the win is modest there — `quality`
+should see more, not precisely measured). Still opt-in: validate output quality on your own
+generation before relying on it.
+
+A build with `ENABLE_SAGEATTENTION=1` only *installs* the package — pass `USE_SAGE_ATTENTION=1` to
+`run-comfyui-h3-spark.sh` to actually launch ComfyUI with `--use-sage-attention`. The two are
+separate switches because one is baked into the image and the other is a per-run choice.
+
+## Optional: turbo LoRAs
+
+`TURBO_LORAS` (comma-separated: `fl2v-4step`, `fl2v-8step`, `ref2v-4step`, `ref2v-8step`, `none`;
+default `fl2v-4step,fl2v-8step`) pre-stages step-distillation LoRAs from
+[`lightx2v/Minimax-h3-Turbo`](https://huggingface.co/lightx2v/Minimax-h3-Turbo) into
+`$MODELS_DIR/loras`, the same way `QUANT`/`CHECKPOINT_SET` stage the base weights. A turbo LoRA
+reproduces the base model's output in far fewer sampling steps, at some cost to fidelity; sampling
+without one is slower but highest-fidelity. The `ref2v-*` pair only pairs with a workflow using the
+`ref2va` checkpoint, so it's opt-in rather than default — set `CHECKPOINT_SET=fl2va+ref2va` too if
+you add either.
 
 ## Verification (no unit tests apply here — this is infra)
 
