@@ -29,6 +29,16 @@ FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
 ARG COMFYUI_REF=v0.33.1
 ARG ENABLE_SAGEATTENTION=0
 
+# TRIED AND REVERTED, 2026-09-10: unified-memory env vars
+# (PYTORCH_NO_CUDA_MEMORY_CACHING, CUDA_MANAGED_FORCE_DEVICE_ALLOC,
+# CUDA_MODULE_LOADING=LAZY, OMP_NUM_THREADS) and a comfy/utils.py patch
+# (copy=True -> copy=False in the --disable-mmap tensor-load path), both
+# sourced from github.com/luix93/DGX-Spark-ComfyUI. Observed SLOWER on
+# nv-spark-01 with these in place - not root-caused which one (or the
+# combination) is responsible. If revisiting, test them individually rather
+# than as a batch, and verify against a real generation before trusting any
+# of them.
+
 WORKDIR /workspace
 
 RUN git clone --depth 1 --branch ${COMFYUI_REF} https://github.com/Comfy-Org/ComfyUI.git
@@ -70,11 +80,46 @@ RUN pip install --no-cache-dir -U "huggingface_hub[cli]"
 
 # Optional, OFF by default: SageAttention roughly doubles generation speed but
 # has a known accuracy issue on sm_120-class Blackwell FP8 PV kernels
-# (Comfy-Org/ComfyUI#15263). sm_121 (Spark) is untested for this bug -- only
-# enable after validating output quality on a real generation without it.
-RUN if [ "$ENABLE_SAGEATTENTION" = "1" ]; then pip install --no-cache-dir sageattention; fi
+# (Comfy-Org/ComfyUI#15263). VERIFIED on sm_121 (nv-spark-01, 2026-09-08/09):
+# finite output, max abs diff ~0.037 vs. reference attention -- expected for a
+# quantized int8/fp8 kernel, not a correctness bug. Still opt-in: only enable
+# after validating output quality on your own real generation.
+#
+# PyPI's `sageattention` only goes up to 1.0.6 -- 2.2.0 exists solely as a git
+# tag, so it's a source build, not `pip install sageattention==2.2.0`.
+# SageAttention's setup.py whitelists SUPPORTED_ARCHS = {"8.0", "8.6", "8.9",
+# "9.0", "12.0"} -- sm_121's own "12.1" isn't in that set and gets silently
+# dropped (the wheel "succeeds" at ~3MB but compiles no kernels at all, then
+# raises `AssertionError: SM89 kernel is not available` on first call). "8.9"
+# unlocks the fp8 kernel infrastructure the sm_120/sm_121 path depends on;
+# "12.0" is the actual sm_120/sm_121 kernel -- together they produce a real
+# ~23MB wheel.
+#
+# Compiling for 12.0 still isn't enough: sageattn()'s runtime dispatcher in
+# core.py checks the *detected* arch string and only has a branch for the
+# literal "sm120" -- GB10 reports "sm121" (get_cuda_arch_versions()), so it
+# falls through to `ValueError: Unsupported CUDA architecture` even though the
+# right kernel was just built. Patched below to route sm121 through the same
+# sageattn_qk_int8_pv_fp8_cuda(...) call as sm120 -- same Blackwell
+# tensor-core generation, and the base image's own
+# `TORCH_CUDA_ARCH_LIST=...12.0+PTX` env var confirms the driver's PTX JIT
+# fallback makes an sm_120-targeted cubin safe to run on sm_121 hardware.
+#
+# Better long-term fix than patching post-install: fork/vendor
+# thu-ml/SageAttention, add "12.1" to SUPPORTED_ARCHS and a proper (not
+# shared) sm121 branch in core.py, and build from that fork instead -- in case
+# NVIDIA ships a genuinely different fp8 tile config for GB10 later.
+ARG SAGEATTENTION_REF=v2.2.0
+RUN if [ "$ENABLE_SAGEATTENTION" = "1" ]; then \
+      TORCH_CUDA_ARCH_LIST='8.9;12.0' pip install --no-cache-dir --no-build-isolation \
+        "git+https://github.com/thu-ml/SageAttention.git@${SAGEATTENTION_REF}" \
+      && CORE=/usr/local/lib/python3.12/dist-packages/sageattention/core.py \
+      && [ "$(grep -c 'elif arch == "sm120":' "$CORE")" = "1" ] \
+      && sed -i 's/elif arch == "sm120":/elif arch in ("sm120", "sm121"):/' "$CORE" \
+      && python3 -c "import sageattention; print('sageattention imported OK')" \
+    ; fi
 
-RUN mkdir -p models/diffusion_models models/text_encoders models/vae \
+RUN mkdir -p models/diffusion_models models/text_encoders models/vae models/loras \
     input output user/default/workflows
 
 EXPOSE 8188
