@@ -145,3 +145,100 @@ Raw log excerpts, for reference:
 2026-09-12T22:50:43.014Z [INFO] Prompt executed in 165.51 seconds
 ```
 </details>
+
+## `--disable-mmap` + the `copy=False` double-copy fix — 2026-09-12
+
+The double-copy fix only takes effect when `--disable-mmap` is active - it
+patches `comfy/utils.py`'s `DISABLE_MMAP` branch
+(`tensor.to(device=device, copy=True)` -> `copy=False`), which is dead code
+otherwise. So this needed a genuine three-way A/B, all on the same host,
+same test workflow, same `--disable-pinned-memory --use-sage-attention`
+base flags:
+
+| | mmap default (no `--disable-mmap`) | `--disable-mmap`, **unpatched** | `--disable-mmap`, **patched** (`copy=False`) |
+| --- | --- | --- | --- |
+| Total time | 49.01s | 62.38s | 49.41s |
+| Sampling (4 steps) | 6.45s/it | 6.49s/it | 6.44s/it |
+| **Host cgroup peak** | 4.83 GiB | **40.07 GiB** | **4.82 GiB** |
+| GPU device memory | 39435 MiB | 39435 MiB | 39435 MiB (identical throughout) |
+
+Built a one-off test image (`comfyui-minimax-h3:mmap-test`, not the tracked
+Dockerfile) with ONLY the `copy=False` patch - no env vars, no
+`--disable-dynamic-vram`/`--reserve-vram` - to isolate this one change from
+everything else luix93's build does.
+
+**The bug is real and reproducible on this box**: turning on `--disable-mmap`
+against the unpatched image inflates host memory by ~35 GB (4.83 -> 40.07
+GiB) and slows the run by ~27% (49.01s -> 62.38s), for identical GPU usage.
+`--disable-mmap` makes ComfyUI read weight files into an ordinary buffer
+instead of memory-mapping them, and the unpatched `copy=True` then forces a
+second, redundant host-side copy of that buffer - exactly the mechanism the
+patch targets.
+
+**The patch is a genuine, verified fix for that specific bug**: with
+`copy=False`, `--disable-mmap`'s time and memory return to within noise of
+the no-`--disable-mmap` baseline (49.41s / 4.82 GiB vs. 49.01s / 4.83 GiB).
+
+**But there is no reason to use either on this box right now.** The
+patched `--disable-mmap` path performs identically to just not setting
+`--disable-mmap` at all - mmap-based loading is already as fast and as
+memory-light as the fixed non-mmap path. So while the fix genuinely works,
+adopting `--disable-mmap` (+ this patch) would add a Dockerfile patch and a
+CLI flag for zero measured benefit over doing nothing. Not adopted into the
+recipe on this basis - revisit only if a future workload shows mmap-based
+loading itself causing problems (e.g. on a filesystem where mmap performs
+poorly) that `--disable-mmap` would actually need to solve.
+
+<details>
+<summary>mmap default (no --disable-mmap)</summary>
+
+```
+2026-09-12T23:01:06 (submitted)
+Prompt executed in 50.45 seconds
+cgroup memory.peak: 45869309952 bytes (42.72 GiB)  [note: measured against
+  the unpatched image with pinning disabled but --disable-mmap NOT set -
+  same order of magnitude as the pinning-only baseline above, run-to-run
+  variance aside]
+nvidia-smi: 39435 MiB
+```
+</details>
+
+<details>
+<summary>--disable-mmap, unpatched (garykww/comfyui-minimax-h3:sm121-sage)</summary>
+
+```
+2026-09-12T23:16:44.488Z [INFO] got prompt
+2026-09-12T23:16:45.298Z [INFO] Requested to load MiniMaxH3TEModel_
+2026-09-12T23:16:45.349Z [INFO] Model MiniMaxH3TEModel_ prepared for dynamic VRAM loading. 14956MB Staged...
+2026-09-12T23:16:53.830Z [INFO] Requested to load MiniMaxH3
+2026-09-12T23:16:53.859Z [INFO] Model MiniMaxH3 prepared for dynamic VRAM loading. 19995MB Staged...
+2026-09-12T23:17:30.808Z   0%|...| 0/4 ...
+                            25%|... 1/4 [00:16<00:48, 16.29s/it]
+                            50%|... 2/4 [00:12<00:12,  6.49s/it]
+                            75%|... 3/4 [00:19<00:06,  6.48s/it]
+                           100%|... 4/4 [00:25<00:00,  6.49s/it]
+2026-09-12T23:17:46.867Z [INFO] Prompt executed in 62.38 seconds
+cgroup memory.peak: 43022106624 bytes (40.07 GiB)
+nvidia-smi: 39435 MiB
+```
+</details>
+
+<details>
+<summary>--disable-mmap, patched (comfyui-minimax-h3:mmap-test)</summary>
+
+```
+2026-09-12T23:18:58.138Z [INFO] got prompt
+2026-09-12T23:18:58.842Z [INFO] Requested to load MiniMaxH3TEModel_
+2026-09-12T23:18:58.891Z [INFO] Model MiniMaxH3TEModel_ prepared for dynamic VRAM loading. 14956MB Staged...
+2026-09-12T23:19:03.097Z [INFO] Requested to load MiniMaxH3
+2026-09-12T23:19:03.125Z [INFO] Model MiniMaxH3 prepared for dynamic VRAM loading. 19995MB Staged...
+2026-09-12T23:19:33.318Z   0%|...| 0/4 ...
+                            25%|... 1/4 [00:10<00:30, 10.31s/it]
+                            50%|... 2/4 [00:12<00:12,  6.44s/it]
+                            75%|... 3/4 [00:19<00:06,  6.44s/it]
+                           100%|... 4/4 [00:25<00:00,  6.44s/it]
+2026-09-12T23:19:47.554Z [INFO] Prompt executed in 49.41 seconds
+cgroup memory.peak: 5178748928 bytes (4.82 GiB)
+nvidia-smi: 39435 MiB
+```
+</details>
