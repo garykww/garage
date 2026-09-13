@@ -18,7 +18,7 @@
 # VERIFY AT BUILD TIME (not yet reverified after the fix above):
 #   3. COMFYUI_REF must be a tag >= v0.31.0. v0.30.0 merged H3 support but
 #      shipped known bugs in the int8_convrot VAE path, audio-VAE offload, and
-#      EasyCache that v0.31.0+ fixed -- the default QUANT tier in
+#      EasyCache that v0.31.0+ fixed -- the default weight set in
 #      run-comfyui-h3-spark.sh uses int8_convrot. Check
 #      https://github.com/Comfy-Org/ComfyUI/releases for the current latest
 #      stable tag and bump the ARG below if a newer one exists.
@@ -73,9 +73,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Used both by this image's own entrypoint context and by
 # run-comfyui-h3-spark.sh's pre-stage step, which runs
-# `docker run --rm --entrypoint bash "$IMAGE" -c 'hf download ...'` against
-# this same image -- keeps the huggingface_hub version consistent between
-# pre-stage and serving.
+# `docker run --rm --entrypoint hf "$IMAGE" download ...` against this same
+# image -- keeps the huggingface_hub version consistent between pre-stage and
+# serving.
 RUN pip install --no-cache-dir -U "huggingface_hub[cli]"
 
 # Optional, OFF by default: SageAttention roughly doubles generation speed but

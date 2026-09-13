@@ -1,7 +1,8 @@
 # Workflow template sources
 
-`ui/` holds ComfyUI's UI *graph* format — mounted read-only into ComfyUI's per-user workflow
-directory (`run-comfyui-h3-spark.sh`'s `WORKFLOWS_DIR`), so they appear in the Workflows tab.
+`ui/` holds ComfyUI's UI *graph* format — copied by `run-comfyui-h3-spark.sh` into
+`~/Workspace/comfyui/workflows` (ComfyUI's per-user workflow directory, mounted writable), skipping
+any file already there, so they appear in the Workflows tab.
 `api-examples/` holds flat *API* prompts for CLI use (not loadable in the UI) — see below.
 
 Originally vendored (not fetched at runtime) 2026-08-15 from the official ComfyUI workflow
@@ -14,27 +15,26 @@ templates repo, so this folder stays self-contained and a known-working version 
 **Locally edited, 2026-08-15**: as fetched, all three have their `UNETLoader`/`CLIPLoader` node
 widget values hardcoded to the `pruned` QUANT tier's filenames (`minimax_h3_fl2va_pruned_int8_convrot`
 + `qwen3vl_32b_minimax_h3_nvfp4_awq`, or `minimax_h3_ref2va_pruned_int8_convrot` for R2V) — confirmed
-this throws "Missing Models" in the UI against this recipe's `int8`-tier default. Rather than stage
-an extra ~54GB of `pruned`-tier weights, the two loader nodes in each file were retargeted to the
-`int8` filenames instead:
+this throws "Missing Models" in the UI against the then-default `int8` tier. The loader nodes were
+retargeted to the `int8` filenames:
 
 | File | `UNETLoader` node | now points to |
 |---|---|---|
 | `ui/video_minimax_h3_t2v.json` | id `6` (inside the `Image to Video (MiniMax H3)` subgraph) | `minimax_h3_fl2va_int8_convrot.safetensors` |
 | `ui/video_minimax_h3_i2v.json` | id `6` (same subgraph) | `minimax_h3_fl2va_int8_convrot.safetensors` |
-| `ui/video_minimax_h3_r2v.json` | id `127` (top-level, no subgraph) | `minimax_h3_ref2va_int8_convrot.safetensors` |
+| `ui/video_minimax_h3_r2v.json` | id `127` (top-level, no subgraph) | `minimax_h3_ref2va_pruned_int8_convrot.safetensors` |
 
 All three `CLIPLoader` nodes (ids `13`, `13`, `128` respectively) now point to
-`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`. **R2V still needs an explicit
-`CHECKPOINT_SET=fl2va+ref2va` pre-stage run** — the default `CHECKPOINT_SET=fl2va` never downloads
-`minimax_h3_ref2va_int8_convrot.safetensors` at all, patched filename or not.
+`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`.
 
-If you switch `QUANT` to `pruned` or `full`, either re-point these two nodes by hand (via the node
-UI) or re-fetch fresh copies from the URLs above and update this file's date.
+**Re-edited 2026-09-13**: the script now mounts the fixed weight set from `spark-control-plane`'s
+recipe, which includes ref2va only as `minimax_h3_ref2va_pruned_int8_convrot`, not the int8 one. R2V's
+`UNETLoader` was pointed back to the pruned file so it resolves. Every filename in all three files is
+now in that mounted set.
 
 If MiniMax H3 support in ComfyUI moves forward materially, re-fetch these from the same
-`Comfy-Org/workflow_templates` repo, re-apply the filename edit above (or switch `QUANT=pruned`
-and skip it), and update this file's date.
+`Comfy-Org/workflow_templates` repo, re-check every loader filename against the script's
+`MODEL_FILES`, and update this file's date.
 
 ## `smoke_test_api_prompt.json`
 

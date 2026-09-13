@@ -11,12 +11,20 @@
 # *** primary LICENSE file, not a rumor. This is not legal advice; read it and
 # *** judge your own situation.
 #
+# This script is the standalone form of spark-control-plane's
+# `comfyui-minimax-h3` and `comfyui-minimax-h3-sage` recipes (recipes.yaml).
+# It launches the same container the planner does: same image, same flags,
+# same host directories, and the same weight files bound read-only out of the
+# HuggingFace cache. A container started here and one started from the panel
+# share one copy of the weights on disk. If the recipe changes, change this
+# script to match.
+#
 # Workflow:
-#   1. Pre-stage the selected weight tier once into a host-mounted models dir
-#      ("download once, mount everywhere"), so the serving boot is a load, not
-#      a download. Only the files for the selected QUANT/CHECKPOINT_SET are
-#      pulled -- the source HF repo is 465GB total across all tiers.
-#   2. Launch ComfyUI in a Docker container.
+#   1. Download the recipe's fixed weight set into the HuggingFace cache, once.
+#      That's named files, not the whole repo, which holds every quantisation
+#      tier and would be ~471 GB.
+#   2. Launch ComfyUI in a Docker container, binding each weight file
+#      read-only onto the path ComfyUI loads it from.
 #   3. Wait for the web server to come up. NOTE: unlike an LLM server, ComfyUI
 #      loads model weights LAZILY per workflow run, not eagerly at boot -- so
 #      "ready" here means the web UI/API is reachable, NOT that weights are
@@ -27,131 +35,104 @@
 # Design decisions (and why):
 #   - No API_KEY: ComfyUI has no built-in bearer-auth flag equivalent to vLLM's
 #     --api-key. If BIND_ADDR is left at its 0.0.0.0 default, anyone reachable
-#     on the network can submit generation jobs and browse $OUTPUT_DIR. Set
+#     on the network can submit generation jobs and browse the output dir. Set
 #     BIND_ADDR=127.0.0.1, or front this with a reverse proxy adding basic
 #     auth, if that's not acceptable.
 #   - No JIT warm-up request: warming vLLM costs one cheap token; "warming" a
 #     video model means actually running a multi-minute generation. WARMUP=1
 #     opts into a background reduced-frame T2V submission after readiness;
 #     default is off so a plain run doesn't silently eat GPU time.
-#   - QUANT tiers (full/int8/pruned) trade quality for headroom on Spark's
-#     128GB UNIFIED pool, shared with the host OS and ComfyUI's own working
-#     set -- see the table in README.md. Default is "int8": comfortable
-#     headroom without the quality hit of the smallest tier.
-#   - CHECKPOINT_SET defaults to fl2va only (T2V + first/last-frame-to-video).
-#     Adding ref2va roughly doubles the diffusion-model download/footprint for
-#     a workflow (reference-to-video) many setups won't use immediately.
+#   - One fixed weight set, not selectable tiers. All eleven files are mounted
+#     and appear in ComfyUI's dropdowns; a workflow picks one combination.
+#     MOUNTING IS NOT LOADING: an unused tier costs disk, not memory.
+#   - --disable-pinned-memory is always passed. See the note at RUN_ARGS.
 #
 # Reproducibility:
-#   - IMAGE is built locally from this folder's Dockerfile (no prebuilt
-#     ComfyUI+H3 image exists for ARM64/CUDA13/sm_121 as of this writing). See
-#     the Dockerfile's header for what to verify/pin at build time.
+#   - The plain IMAGE is built locally from this folder's Dockerfile (no
+#     prebuilt ComfyUI+H3 image exists for ARM64/CUDA13/sm_121 as of this
+#     writing). The SageAttention image is published on Docker Hub. See the
+#     Dockerfile's header for what to verify/pin at build time.
 
 set -euo pipefail
 
 # ---- Configuration (override via environment) -------------------------------
-IMAGE="${IMAGE:-comfyui-minimax-h3:local}"   # docker build -t comfyui-minimax-h3:local .
+# On by default: run the SageAttention variant (recipe
+# `comfyui-minimax-h3-sage`). Uses that recipe's IMAGE and CONTAINER_NAME
+# defaults and passes --use-sage-attention. The flag only works against an
+# image built with `--build-arg ENABLE_SAGEATTENTION=1` -- otherwise the
+# package isn't installed and startup fails. See the Dockerfile's
+# SageAttention comment. Set USE_SAGE_ATTENTION=0 for the plain recipe
+# (`comfyui-minimax-h3`), which needs `comfyui-minimax-h3:local` built first.
+USE_SAGE_ATTENTION="${USE_SAGE_ATTENTION:-1}"
+
+if [[ "$USE_SAGE_ATTENTION" == "1" ]]; then
+  IMAGE="${IMAGE:-garykww/comfyui-minimax-h3:sm121-sage}"
+  CONTAINER_NAME="${CONTAINER_NAME:-comfyui-h3-sage}"
+else
+  IMAGE="${IMAGE:-comfyui-minimax-h3:local}"   # docker build -t comfyui-minimax-h3:local .
+  CONTAINER_NAME="${CONTAINER_NAME:-comfyui-h3}"
+fi
+
 PORT="${PORT:-8188}"
 # Host interface to publish the port on. 0.0.0.0 = reachable from other
-# machines on the network (default, matches this repo's other Spark launchers).
-# Set to 127.0.0.1 to restrict to this host only -- recommended given ComfyUI
-# has no built-in auth (see design note above).
+# machines on the network (default, matches the recipe). Set to 127.0.0.1 to
+# restrict to this host only -- recommended given ComfyUI has no built-in auth
+# (see design note above).
 BIND_ADDR="${BIND_ADDR:-0.0.0.0}"
-CONTAINER_NAME="${CONTAINER_NAME:-comfyui-h3}"
 
-# QUANT selects the diffusion-model + text-encoder precision tier. Sizes below
-# include both VAEs (video_vae_fp16 4.9GB + audio_vae_fp32 0.6GB, always
-# pulled). All figures are against Spark's 128GB UNIFIED pool (shared with the
-# host OS + ComfyUI's own working set):
-#   full   : fl2va_bf16 (61.7GB) + qwen3vl_bf16 (48.0GB)              ~115.2GB -- max quality, thin headroom, opt-in only
-#   int8   : fl2va_int8_convrot (31.7GB) + qwen3vl_int8_convrot (25.3GB)  ~62.5GB -- DEFAULT, comfortable headroom
-#   pruned : fl2va_pruned_int8_convrot (19.5GB) + qwen3vl_nvfp4_awq (14.6GB) ~39.6GB -- max headroom (e.g. to share the
-#            box with vllm/dgx-spark/ containers running concurrently)
-#
-# NOTE: Comfy-Org's own vendored T2V/I2V/R2V templates ship with their
-# UNETLoader/CLIPLoader node widget values hardcoded to the "pruned" tier's
-# filenames (fixed strings, not a dropdown resolved at runtime) -- opening one
-# with only "int8" staged throws "Missing Models" in the UI. workflows/ui/*.json
-# in this repo have been edited to reference the "int8" filenames instead, so
-# they match this DEFAULT out of the box. If you switch QUANT (or restore the
-# original templates from workflows/SOURCES.md's upstream URLs), re-point
-# those two nodes' filenames to match, via the node UI or by editing the JSON.
-QUANT="${QUANT:-int8}"
+# Everything ComfyUI writes lives under one host directory, a subfolder per
+# kind, the same as the recipe's volumes. Workflows especially: ComfyUI saves
+# them inside the container by default, so without this mount anything you
+# save dies with the container.
+COMFYUI_DIR="${COMFYUI_DIR:-$HOME/Workspace/comfyui}"
 
-# CHECKPOINT_SET selects which diffusion-model family/families to pre-stage:
-#   fl2va        : text-to-video + first/last-frame-to-video (T2V, I2V templates) -- DEFAULT
-#   fl2va+ref2va : adds reference-to-video (R2V template); downloads a second
-#                  diffusion checkpoint at the SAME quant tier (roughly doubles
-#                  the diffusion-model download/footprint)
-CHECKPOINT_SET="${CHECKPOINT_SET:-fl2va}"
-
-HF_REPO="${HF_REPO:-Comfy-Org/MiniMax-H3}"
-
-# TURBO_LORAS pre-stages step-distillation LoRAs from lightx2v/Minimax-h3-Turbo
-# -- comma-separated, from: fl2v-4step, fl2v-8step, ref2v-4step, ref2v-8step,
-# none. A turbo LoRA reproduces the base model's output in far fewer sampling
-# steps at some cost to fidelity; skip a workflow's LoRA (leave it out of this
-# list, or set QUANT-equivalent "none") to sample the full model instead.
-# DEFAULT covers fl2va's own draft/fast split; the ref2v-* pair only matters
-# once CHECKPOINT_SET includes ref2va, so they're opt-in rather than default.
-TURBO_LORAS="${TURBO_LORAS:-fl2v-4step,fl2v-8step}"
-HF_TURBO_REPO="${HF_TURBO_REPO:-lightx2v/Minimax-h3-Turbo}"
-
-MODELS_DIR="${MODELS_DIR:-$HOME/.cache/comfyui-h3/models}"
-OUTPUT_DIR="${OUTPUT_DIR:-$HOME/comfyui-h3-output}"
-INPUT_DIR="${INPUT_DIR:-$HOME/comfyui-h3-input}"   # reference images/video for I2V/R2V workflows
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Only workflows/ui/ (the actual UI-graph-format templates) gets mounted into
-# ComfyUI's workflow list. workflows/api-examples/ holds the flat API-format
-# smoke-test prompt (see README's "CLI smoke test"), which the web UI can't
-# load as a graph, so it's kept out of this mount.
-WORKFLOWS_DIR="${WORKFLOWS_DIR:-$SCRIPT_DIR/workflows/ui}"
+# The HuggingFace cache the weights are downloaded into and bound out of --
+# the same one spark-control-plane uses, so neither downloads what the other
+# already has.
+HF_CACHE="${HF_HOME:-$HOME/.cache/huggingface}"
 
 SKIP_PRESTAGE="${SKIP_PRESTAGE:-0}"
 # Opt-in: after readiness, submit a reduced-frame T2V job in the background so
 # weights are loaded before your first real request. Off by default -- see
 # design note above.
 WARMUP="${WARMUP:-0}"
-# Opt-in: passes ComfyUI's --use-sage-attention flag. Only works if IMAGE was
-# built with `--build-arg ENABLE_SAGEATTENTION=1` -- otherwise the package
-# isn't installed and startup fails. See the Dockerfile's SageAttention
-# comment for why this is a separate build-time vs. run-time switch.
-USE_SAGE_ATTENTION="${USE_SAGE_ATTENTION:-0}"
 
-# ---- Resolve QUANT -> exact filenames ----------------------------------------
-case "$QUANT" in
-  full)   DIFF_SUFFIX="bf16";                TE_FILE="qwen3vl_32b_minimax_h3_bf16.safetensors" ;;
-  int8)   DIFF_SUFFIX="int8_convrot";        TE_FILE="qwen3vl_32b_minimax_h3_int8_convrot.safetensors" ;;
-  pruned) DIFF_SUFFIX="pruned_int8_convrot"; TE_FILE="qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" ;;
-  *) echo "ERROR: QUANT must be full|int8|pruned (got '$QUANT')" >&2; exit 1 ;;
-esac
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DIFF_FILES=("minimax_h3_fl2va_${DIFF_SUFFIX}.safetensors")
-case "$CHECKPOINT_SET" in
-  fl2va) ;;
-  fl2va+ref2va) DIFF_FILES+=("minimax_h3_ref2va_${DIFF_SUFFIX}.safetensors") ;;
-  *) echo "ERROR: CHECKPOINT_SET must be fl2va|fl2va+ref2va (got '$CHECKPOINT_SET')" >&2; exit 1 ;;
-esac
+# ---- Weights (mirrors the recipe's `weights:` block) --------------------------
+# Sizes are decimal GB, measured from the files on nv-spark-01.
+HF_REPO="Comfy-Org/MiniMax-H3"                 # 124.6 GB for the seven files below
+MODEL_FILES=(
+  # The measured default: fl2va int8, and what the ~100 GB memory figure in
+  # README.md describes.
+  diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors
+  text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors
+  vae/minimax_h3_video_vae_fp16.safetensors
+  vae/minimax_h3_audio_vae_fp32.safetensors
+  # 21.0 GB against the 34.0 above, same quantisation. "pruned" compresses the
+  # adaLN timestep path only; all 50 transformer blocks are intact.
+  diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+  # Reference-to-video, the other task family.
+  diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors
+  # 15.7 GB against the 27.1 above. The least predictable swap here: NVFP4 AWQ
+  # changes the method, not just the precision.
+  text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+)
+MODEL_MOUNT_BASE="/workspace/ComfyUI/models"
 
-# ---- Resolve TURBO_LORAS -> exact filenames ----------------------------------
-LORA_FILES=()
-IFS=',' read -ra TURBO_LORA_TOKENS <<< "$TURBO_LORAS"
-for token in "${TURBO_LORA_TOKENS[@]}"; do
-  case "$token" in
-    none) ;;
-    fl2v-4step)  LORA_FILES+=("minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors") ;;
-    fl2v-8step)  LORA_FILES+=("minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors") ;;
-    ref2v-4step) LORA_FILES+=("minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors") ;;
-    ref2v-8step) LORA_FILES+=("minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors") ;;
-    *) echo "ERROR: TURBO_LORAS entries must be from fl2v-4step|fl2v-8step|ref2v-4step|ref2v-8step|none (got '$token')" >&2; exit 1 ;;
-  esac
-  if [[ "$token" == ref2v-* && "$CHECKPOINT_SET" != *ref2va* ]]; then
-    echo "WARNING: TURBO_LORAS includes '$token' but CHECKPOINT_SET=$CHECKPOINT_SET has no ref2va checkpoint to pair it with." >&2
-  fi
-done
+HF_TURBO_REPO="lightx2v/Minimax-h3-Turbo"      # 7.81 GB for the four LoRAs below
+LORA_FILES=(
+  # Step-distillation LoRAs: 4-step and 8-step turbo tiers for each task family.
+  # A workflow only uses one if it wires a LoraLoaderModelOnly node to it.
+  minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors
+  minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors
+  minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors
+  minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors
+)
+LORA_MOUNT_BASE="/workspace/ComfyUI/models/loras"
 
-mkdir -p "$MODELS_DIR"/diffusion_models "$MODELS_DIR"/text_encoders "$MODELS_DIR"/vae "$MODELS_DIR"/loras \
-         "$OUTPUT_DIR" "$INPUT_DIR"
+mkdir -p "$COMFYUI_DIR"/input "$COMFYUI_DIR"/output "$COMFYUI_DIR"/workflows \
+         "$COMFYUI_DIR"/models/loras "$HF_CACHE"
 
 # ---- Pre-flight ---------------------------------------------------------------
 if [[ -z "${HF_TOKEN:-}" ]]; then
@@ -159,82 +140,114 @@ if [[ -z "${HF_TOKEN:-}" ]]; then
   echo "         export HF_TOKEN=hf_xxx   (then re-run)" >&2
 fi
 
-# ---- Pre-stage weights (filtered -- NOT the full 465GB repo) -----------------
-# Selects only the files for the resolved QUANT/CHECKPOINT_SET tier. Runs
-# inside the same image ComfyUI serves from, so huggingface_hub stays in sync
-# between pre-stage and serving. Idempotent: `hf download` skips files already
-# present, so re-running (e.g. after switching QUANT) only fetches the delta.
+# ---- Pre-stage weights into the HuggingFace cache ----------------------------
+# Runs `hf` inside the same image ComfyUI serves from, so the host needs no
+# Python. Runs as the calling user so the cache stays owned by them -- the
+# control plane's cache panel lists and deletes entries there. Idempotent:
+# `hf download` skips files already in the cache.
 #
 # Skip with:  SKIP_PRESTAGE=1 ./run-comfyui-h3-spark.sh
-if [[ "$SKIP_PRESTAGE" != "1" ]]; then
-  INCLUDE_ARGS=()
-  for f in "${DIFF_FILES[@]}"; do INCLUDE_ARGS+=(--include "diffusion_models/$f"); done
-  INCLUDE_ARGS+=(--include "text_encoders/$TE_FILE")
-  INCLUDE_ARGS+=(--include "vae/minimax_h3_video_vae_fp16.safetensors")
-  INCLUDE_ARGS+=(--include "vae/minimax_h3_audio_vae_fp32.safetensors")
-
-  echo "Pre-staging weights (QUANT=$QUANT, CHECKPOINT_SET=$CHECKPOINT_SET) into $MODELS_DIR ..."
+hf_download() {
   docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    -e HF_HOME=/hf \
     -e HF_TOKEN="${HF_TOKEN:-}" \
-    -v "${MODELS_DIR}:/staging" \
-    --entrypoint bash \
+    -v "${HF_CACHE}:/hf" \
+    --entrypoint hf \
     "$IMAGE" \
-    -c "hf download '$HF_REPO' ${INCLUDE_ARGS[*]@Q} --local-dir /staging"
+    download "$@"
+}
+
+if [[ "$SKIP_PRESTAGE" != "1" ]]; then
+  echo "Downloading $HF_REPO (${#MODEL_FILES[@]} files, ~124.6 GB) into $HF_CACHE ..."
+  hf_download "$HF_REPO" "${MODEL_FILES[@]}"
+  echo "Downloading $HF_TURBO_REPO (${#LORA_FILES[@]} files, ~7.8 GB) into $HF_CACHE ..."
+  hf_download "$HF_TURBO_REPO" "${LORA_FILES[@]}"
   echo "Pre-stage complete."
-
-  # Turbo LoRAs live in a separate repo from the base weights above, and its
-  # files sit at repo root (not under a diffusion_models/ prefix), so this is
-  # its own `hf download` pointed at the loras/ subdir of the same mount.
-  if [[ "${#LORA_FILES[@]}" -gt 0 ]]; then
-    LORA_INCLUDE_ARGS=()
-    for f in "${LORA_FILES[@]}"; do LORA_INCLUDE_ARGS+=(--include "$f"); done
-
-    echo "Pre-staging turbo LoRAs (TURBO_LORAS=$TURBO_LORAS) from $HF_TURBO_REPO ..."
-    docker run --rm \
-      -e HF_TOKEN="${HF_TOKEN:-}" \
-      -v "${MODELS_DIR}/loras:/staging" \
-      --entrypoint bash \
-      "$IMAGE" \
-      -c "hf download '$HF_TURBO_REPO' ${LORA_INCLUDE_ARGS[*]@Q} --local-dir /staging"
-    echo "Turbo LoRA pre-stage complete."
-  fi
 else
-  echo "Skipping pre-stage (SKIP_PRESTAGE=1); using existing $MODELS_DIR."
+  echo "Skipping pre-stage (SKIP_PRESTAGE=1); using what is already in $HF_CACHE."
 fi
 
-# ---- Launch --------------------------------------------------------------------
-echo "Starting ComfyUI container '$CONTAINER_NAME' ..."
+# ---- Resolve cache snapshots -> read-only binds ------------------------------
+# The cache addresses a revision by its commit sha, which changes when the repo
+# is updated, so read it out of the repo's own refs/main rather than hardcoding
+# it. Each file in the snapshot is a symlink to its blob; Docker resolves the
+# symlink, so the container sees an ordinary file at the path it expects.
+snapshot_dir() {
+  local repo_dir="$HF_CACHE/hub/models--${1//\//--}"
+  local rev
+  rev="$(cat "$repo_dir/refs/main" 2>/dev/null || true)"
+  if [[ -z "$rev" ]]; then
+    echo "ERROR: $1 is not in the HuggingFace cache at $HF_CACHE. Re-run without SKIP_PRESTAGE=1." >&2
+    exit 1
+  fi
+  printf '%s\n' "$repo_dir/snapshots/$rev"
+}
 
-# Docker run flags:
+WEIGHT_MOUNTS=()
+add_weight_mounts() {   # add_weight_mounts <repo> <mount base> <file>...
+  local snap base="$2" f
+  snap="$(snapshot_dir "$1")"
+  shift 2
+  for f in "$@"; do
+    if [[ ! -e "$snap/$f" ]]; then
+      echo "ERROR: $snap/$f is missing. Re-run without SKIP_PRESTAGE=1." >&2
+      exit 1
+    fi
+    WEIGHT_MOUNTS+=(-v "$snap/$f:$base/$f:ro")
+  done
+}
+add_weight_mounts "$HF_REPO" "$MODEL_MOUNT_BASE" "${MODEL_FILES[@]}"
+add_weight_mounts "$HF_TURBO_REPO" "$LORA_MOUNT_BASE" "${LORA_FILES[@]}"
+
+# ---- Seed the workflows directory --------------------------------------------
+# The workflows mount is your data, not this repo's. Copy the vendored UI
+# templates in only where no file of that name exists, so an edited copy is
+# never overwritten.
+for f in "$SCRIPT_DIR"/workflows/ui/*.json; do
+  dest="$COMFYUI_DIR/workflows/$(basename "$f")"
+  [[ -e "$dest" ]] || cp "$f" "$dest"
+done
+
+# ---- Launch --------------------------------------------------------------------
+echo "Starting ComfyUI container '$CONTAINER_NAME' from $IMAGE ..."
+
+# Docker run flags (the same set spark-control-plane's planner emits):
 #   -d                      run detached; we tail logs separately below
 #   --name                  stable container name so restart/stop/logs are predictable
-#   --ipc=host              share host IPC namespace -> larger /dev/shm
 #   --restart unless-stopped  auto-restart on crash/reboot, stays down after an explicit `docker stop`
 #   --gpus all              expose the GB10 GPU to the container
+#   --ipc=host              share host IPC namespace -> past docker's 64MB /dev/shm
 #   -p BIND_ADDR:PORT:8188  publish ComfyUI's port; BIND_ADDR controls reachability
-#   -v MODELS_DIR           the diffusion_models/text_encoders/vae/loras tree pre-staged above --
-#                           a single whole-directory mount is deliberate: a live container on
-#                           nv-spark-01 once drifted to individual per-file binds instead (to add
-#                           weights without a restart), which is a reasonable stopgap but not what
-#                           this script produces -- a fresh run always gets this mount, so treat
-#                           per-file binds as a manual, temporary deviation, not a second supported
-#                           shape.
-#   -v OUTPUT_DIR           generated videos land here on the host
-#   -v INPUT_DIR            reference images/video for I2V/R2V workflows
-#   -v WORKFLOWS_DIR        vendored workflow templates -> ComfyUI's per-user workflow list
+#   -v COMFYUI_DIR/...      input, output, saved workflows, and a writable loras/ for LoRAs
+#                           dropped in by hand
+#   WEIGHT_MOUNTS           each weight file read-only out of the HF cache. The turbo LoRAs
+#                           nest inside the writable loras/ mount; Docker applies the more
+#                           specific bind on top.
 #
-# CMD args are passed explicitly (rather than left to the image's default
-# CMD) so USE_SAGE_ATTENTION can append --use-sage-attention; the first two
-# args reproduce the Dockerfile's own default CMD.
-RUN_ARGS=(--listen 0.0.0.0 --port 8188)
+# CMD args replace the image's default CMD wholesale, so --listen/--port are
+# repeated here.
+#
+# --disable-pinned-memory stops a failure, not just a slowdown. ComfyUI budgets
+# pinned host memory at ~109.5 GB of the 121.7 GiB pool here, counting swap,
+# and pinned pages can't be swapped, so as it pins it pushes everything else
+# into swap until swap is gone. That is how a 2026-09-06 ref2va run died in
+# VAEDecode after 7h19m of sampling ("Enabled pinned memory 112147.0" in the
+# log). Measured A/B on 2026-09-12: same speed, identical GPU memory, host
+# cgroup peak 42.72 GiB -> 4.83 GiB. See MEMORY_FLAG_BENCHMARKS.md.
+#
+# Tried and deliberately NOT set (see README.md "Memory flags"): --highvram,
+# --use-ck-attention, --disable-mmap, --disable-dynamic-vram, --reserve-vram.
+RUN_ARGS=(--listen 0.0.0.0 --port 8188 --disable-pinned-memory)
 if [[ "$USE_SAGE_ATTENTION" == "1" ]]; then RUN_ARGS+=(--use-sage-attention); fi
 
-docker run -d --name "$CONTAINER_NAME" --ipc=host --restart unless-stopped \
-  --gpus all -p "${BIND_ADDR}:${PORT}:8188" \
-  -v "${MODELS_DIR}:/workspace/ComfyUI/models" \
-  -v "${OUTPUT_DIR}:/workspace/ComfyUI/output" \
-  -v "${INPUT_DIR}:/workspace/ComfyUI/input" \
-  -v "${WORKFLOWS_DIR}:/workspace/ComfyUI/user/default/workflows" \
+docker run -d --name "$CONTAINER_NAME" --restart unless-stopped \
+  --gpus all --ipc=host -p "${BIND_ADDR}:${PORT}:8188" \
+  -v "${COMFYUI_DIR}/input:/workspace/ComfyUI/input" \
+  -v "${COMFYUI_DIR}/output:/workspace/ComfyUI/output" \
+  -v "${COMFYUI_DIR}/workflows:/workspace/ComfyUI/user/default/workflows" \
+  -v "${COMFYUI_DIR}/models/loras:/workspace/ComfyUI/models/loras" \
+  "${WEIGHT_MOUNTS[@]}" \
   "$IMAGE" "${RUN_ARGS[@]}"
 
 # ---- Wait for readiness -------------------------------------------------------
@@ -271,25 +284,24 @@ if [[ "$WARMUP" == "1" ]]; then
   # API expects a full node graph, and the "reduced-frame" edit is a workflow
   # decision (which node/field to shrink) best made by hand once per workflow.
   # Left as a documented manual step rather than a brittle jq/sed graph edit.
-  echo "NOTE: WARMUP is a placeholder for now -- load workflows/video_minimax_h3_t2v.json"
+  echo "NOTE: WARMUP is a placeholder for now -- load video_minimax_h3_t2v.json"
   echo "      in the UI, reduce its frame count/steps, and Queue Prompt manually."
 fi
 
 echo
-echo "Ready.   http://localhost:${PORT}"
-echo "Logs:    docker logs -f ${CONTAINER_NAME}"
-echo "Models:  $MODELS_DIR"
-echo "Output:  $OUTPUT_DIR"
-echo "Input:   $INPUT_DIR"
+echo "Ready.     http://localhost:${PORT}"
+echo "Logs:      docker logs -f ${CONTAINER_NAME}"
+echo "Weights:   $HF_CACHE (read-only binds)"
+echo "Data:      $COMFYUI_DIR/{input,output,workflows,models/loras}"
 echo
 echo "NOTE: readiness above only confirms the web UI/API is up. MiniMax H3"
-echo "weights (tier: $QUANT) load lazily on first workflow run -- expect the"
-echo "first Queue Prompt to take minutes. See README.md 'Verification'."
+echo "weights load lazily on first workflow run -- expect the first Queue"
+echo "Prompt to take minutes. See README.md 'Verification'."
 if [[ "$BIND_ADDR" == "0.0.0.0" ]]; then
-  LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   echo
   echo "WARNING: ComfyUI has NO built-in authentication. BIND_ADDR=0.0.0.0 means"
   echo "anyone reachable at http://${LAN_IP:-<this-host-ip>}:${PORT} can submit"
-  echo "jobs and browse $OUTPUT_DIR. Set BIND_ADDR=127.0.0.1 to restrict to"
+  echo "jobs and browse $COMFYUI_DIR/output. Set BIND_ADDR=127.0.0.1 to restrict to"
   echo "localhost, or front this with a reverse proxy + basic auth for LAN/remote access."
 fi
